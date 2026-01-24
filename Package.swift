@@ -23,7 +23,11 @@ let package = Package(
       ),
       .target(
          name: "Splendor",
-         dependencies: ["Core", "Utility"],
+         dependencies: [
+            "Core", "Utility",
+            .product(name: "MLX", package: "mlx-swift"),
+            .product(name: "MLXNN", package: "mlx-swift")
+         ],
          path: "src/splendor"
       ),
       .target(
