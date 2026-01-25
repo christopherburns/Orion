@@ -8,20 +8,22 @@ public class Option {
    var shortName : String = ""
    var longName : String = ""
    var doc : String = ""
+   var longDoc : String? = nil
    var requireArgument : Bool = true
 
-   init (_ category : String, _ short : String, _ long : String, _ doc : String, requireArgument : Bool = true) {
+   init (_ category : String, _ short : String, _ long : String, _ doc : String, longDoc: String? = nil, requireArgument : Bool = true) {
       self.category = category
       self.shortName = short
       self.longName = long
       self.doc = doc
+      self.longDoc = longDoc
       self.requireArgument = requireArgument
    }
 }
 
 public class ToggleOption : Option {
-   init (_ category : String, _ long: String, _ doc: String) {
-      super.init(category, "", long, doc, requireArgument: false)
+   init (_ category : String, _ long: String, _ doc: String, longDoc: String? = nil) {
+      super.init(category, "", long, doc, longDoc: longDoc, requireArgument: false)
    }
 }
 
@@ -183,7 +185,7 @@ public class OptionParser {
 
    public init (help : String = "[No Help Message]") {
       self.helpMessage = help
-      addOption("General", "h", "help", "Displays this help message")
+      addOption("General", "h", "help", "Displays this help message", requireArgument: false)
    }
 
    public var description : String {
@@ -194,12 +196,12 @@ public class OptionParser {
       return s
    }
 
-   public func addOption (_ category : String, _ shortFlag : String, _ longFlag : String, _ doc : String, requireArgument: Bool = true) {
-      options.append(Option(category, shortFlag, longFlag, doc, requireArgument: requireArgument))
+   public func addOption (_ category : String, _ shortFlag : String, _ longFlag : String, _ doc : String, longDoc: String? = nil, requireArgument: Bool = true) {
+      options.append(Option(category, shortFlag, longFlag, doc, longDoc: longDoc, requireArgument: requireArgument))
    }
 
-   public func addToggleOption (_ category : String, _ long : String, _ doc : String) {
-      toggleOptions.append(ToggleOption(category, long, doc))
+   public func addToggleOption (_ category : String, _ long : String, _ doc : String, longDoc: String? = nil) {
+      toggleOptions.append(ToggleOption(category, long, doc, longDoc: longDoc))
    }
 
 
@@ -328,6 +330,7 @@ public class OptionParser {
          uniqueCategories.insert("General", at: 0)
       }
 
+      // First pass: print all options with short documentation only
       for category in uniqueCategories {
          print ("\n\(category)\n")
          for o in options {
@@ -345,19 +348,78 @@ public class OptionParser {
                print ("  \(shortFieldString)  \(longFieldString)    \(to.doc)")
             }
          }
+
+         print("")
+
+         // Now print the long-form documentation string
+         let categoryOptions = options.filter { $0.category == category && $0.longDoc != nil }
+         let categoryToggleOptions = toggleOptions.filter { $0.category == category && $0.longDoc != nil }
+
+
+         let WORD_WRAP_WIDTH = 100
+         let INDENT = 2
+
+         for o in categoryOptions {
+            // Print option header: -s, --long-name
+            let shortPart = o.shortName.isEmpty ? "" : "-\(o.shortName), "
+            let optionName = "\(shortPart)--\(o.longName)"
+            let boldOptionName = "\u{001B}[1m\(optionName)\u{001B}[0m"
+
+            // Print wrapped long documentation with indentation
+            let wrappedDoc = wrapText("\(boldOptionName) \(o.longDoc!)", width: WORD_WRAP_WIDTH, indent: INDENT)
+            print(wrappedDoc)
+            print("")  // Blank line after each option's documentation
+         }
+
+         for to in categoryToggleOptions {
+            // Print option header: --{enable,disable}-long-name
+            let optionName = "--{enable,disable}-\(to.longName)"
+            let boldOptionName = "\u{001B}[1m\(optionName)\u{001B}[0m"
+
+            // Print wrapped long documentation with indentation
+            let wrappedDoc = wrapText("\(boldOptionName) \(to.longDoc!)", width: WORD_WRAP_WIDTH, indent: INDENT)
+            print(wrappedDoc)
+            print("")  // Blank line after each option's documentation
+         }
       }
    }
 
    public func copy () -> OptionParser {
       let newParser = OptionParser(help: self.helpMessage)
       newParser.commandLineArgs = self.commandLineArgs
-      newParser.options = self.options.map { Option($0.category, $0.shortName, $0.longName, $0.doc) }
-      newParser.toggleOptions = self.toggleOptions.map { ToggleOption($0.category, $0.longName, $0.doc) }
+      newParser.options = self.options.map { Option($0.category, $0.shortName, $0.longName, $0.doc, longDoc: $0.longDoc, requireArgument: $0.requireArgument) }
+      newParser.toggleOptions = self.toggleOptions.map { ToggleOption($0.category, $0.longName, $0.doc, longDoc: $0.longDoc) }
       newParser.parsedOptions = self.parsedOptions
       newParser.parsedToggleOptions = self.parsedToggleOptions
       newParser.arguments = self.arguments
       return newParser
    }
+}
+
+/// Helper function to wrap text to a specified width with indentation
+private func wrapText (_ text: String, width: Int, indent: Int) -> String {
+   let words = text.split(separator: " ")
+   var lines: [String] = []
+   var currentLine = String(repeating: " ", count: indent)
+
+   for word in words {
+      let wordStr = String(word)
+      if currentLine.count + wordStr.count + 1 <= width {
+         if currentLine.count > indent {
+            currentLine += " "
+         }
+         currentLine += wordStr
+      } else {
+         if currentLine.count > indent {
+            lines.append(currentLine)
+         }
+         currentLine = String(repeating: " ", count: indent) + wordStr
+      }
+   }
+   if currentLine.count > indent {
+      lines.append(currentLine)
+   }
+   return lines.joined(separator: "\n")
 }
 
 extension String {
