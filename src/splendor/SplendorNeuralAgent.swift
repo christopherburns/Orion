@@ -51,26 +51,48 @@ class PolicyValueNetwork: Module {
    let valueHidden: Linear
    let valueOutput: Linear
 
-   override init () {
-      // Shared trunk: 360 -> 512 -> 512 -> 256
-      self.dense1 = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: PolicyValueNetwork.INPUT_DIMENSIONS, outputDimensions: 512))
-      self.dense2 = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 512, outputDimensions: 512))
-      self.dense3 = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 512, outputDimensions: 256))
+   /// Initialize network with optional seed for deterministic weight initialization
+   /// - Parameter seed: If provided, weights will be initialized deterministically
+   init (seed: UInt64? = nil) {
+      // Create deterministic key if seed provided
+      let keys: [MLXArray]
+      if let seed = seed {
+         // Create base key and split into 6 keys (one for each layer)
+         let baseKey = MLXRandom.key(seed)
+         keys = MLXRandom.split(key: baseKey, into: 6)
+      } else {
+         keys = Array(repeating: MLXArray(0), count: 6) // Dummy keys, will use nil
+      }
 
-      // Policy head: 256 -> 43 logits
-      self.policyHead = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 256, outputDimensions: PolicyValueNetwork.POLICY_DIMENSIONS))
+      // Shared trunk: 360 -> 512 -> 512 -> 256
+      self.dense1 = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: PolicyValueNetwork.INPUT_DIMENSIONS, outputDimensions: 512, key: seed == nil ? nil : keys[0]))
+      self.dense2 = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 512, outputDimensions: 512, key: seed == nil ? nil : keys[1]))
+      self.dense3 = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 512, outputDimensions: 256, key: seed == nil ? nil : keys[2]))
+
+      // Policy head: 256 -> 48 logits
+      self.policyHead = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 256, outputDimensions: PolicyValueNetwork.POLICY_DIMENSIONS, key: seed == nil ? nil : keys[3]))
 
       // Value head: 256 -> 128 -> 1
-      self.valueHidden = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 256, outputDimensions: 128), bias: MLXArray.zeros([128]))
-      self.valueOutput = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 128, outputDimensions: 1), bias: MLXArray.zeros([1]))
+      self.valueHidden = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 256, outputDimensions: 128, key: seed == nil ? nil : keys[4]), bias: MLXArray.zeros([128]))
+      self.valueOutput = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 128, outputDimensions: 1, key: seed == nil ? nil : keys[5]), bias: MLXArray.zeros([1]))
 
       super.init()
    }
 
-   /// Initialize a linear layer with scaled normal distribution
-   private static func heInitialization (inputDimensions: Int, outputDimensions: Int) -> MLXArray {
+   /// Convenience initializer for non-deterministic initialization
+   override convenience init () {
+      self.init(seed: nil)
+   }
+
+   /// Initialize a linear layer with He initialization
+   /// - Parameters:
+   ///   - inputDimensions: Number of input features
+   ///   - outputDimensions: Number of output features
+   ///   - key: Optional PRNG key for deterministic initialization
+   /// - Returns: Weight matrix initialized with He normal distribution
+   private static func heInitialization (inputDimensions: Int, outputDimensions: Int, key: MLXArray? = nil) -> MLXArray {
       let stddev = sqrt(2.0 / Float(inputDimensions))
-      return MLXRandom.normal([outputDimensions, inputDimensions]) * stddev
+      return MLXRandom.normal([outputDimensions, inputDimensions], key: key) * stddev
    }
 
    /// Forward pass through the network
@@ -233,11 +255,15 @@ public class SplendorNeuralAgent: AgentProtocol {
    private let network: PolicyValueNetwork
    private let metadata: ModelMetadata
 
-   public init () {
-      self.network = PolicyValueNetwork()
+   /// Initialize with untrained network
+   /// - Parameter seed: Optional seed for deterministic weight initialization
+   public init (seed: UInt64? = nil) {
+      self.network = PolicyValueNetwork(seed: seed)
       self.metadata = ModelMetadata(version: "0.1.0", architectureVersion: PolicyValueNetwork.ARCHITECTURE_VERSION)
    }
 
+   /// Initialize by loading a trained model from disk
+   /// - Parameter url: Directory URL where the model is stored
    public init (url: URL) throws {
       let (network, metadata) = try PolicyValueNetwork.load(from: url)
       self.network = network
