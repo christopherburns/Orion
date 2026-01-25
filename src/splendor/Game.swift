@@ -132,11 +132,16 @@ public struct Game: GameProtocol {
       case takeThreeGems([GemType]) // Three different colored gems
       case takeTwoGems(GemType) // Two of one color
       case reserveCard(tier: Int, position: Int) // Reserve one of the available cards
-      case pass // Do nothing, pass turn to next player
+      case discardGem(GemType) // Discard a gem (used when over 10 gem limit)
+      case discardGoldGem // Discard a gold gem (used when over 10 gem limit)
+   }
+
+   public enum GamePhase {
+      case normalAction  // Player takes their main action
+      case discarding    // Player must discard gems to reach 10 gem limit
    }
 
    public static let GEMS_PER_PLAYER_LIMIT = 10
-   public static let GEM_SUPPLY_LIMIT = 6
    public static let RESERVED_CARDS_PER_PLAYER_LIMIT = 3
    public static let VICTORY_POINTS_THRESHOLD = 15
 
@@ -146,8 +151,8 @@ public struct Game: GameProtocol {
    //    10 take three gems moves (combinations of 3 from 5 gem types)
    //    5 take two gems moves (5 possible gem types)
    //    12 reserve moves (3 tiers × 4 positions)
-   //    1 pass move
-   private static let CANONICAL_MOVE_COUNT = 12 + 3 + 10 + 5 + 12 + 1
+   //    6 discard gem moves (6 gem types including gold)
+   public static let CANONICAL_MOVE_COUNT = 12 + 3 + 10 + 5 + 12 + 6
 
    // Three card decks, one for each tier, top four are face up and available to be bought
    public var cardDecks: [[Card]] = [[], [], []]
@@ -156,6 +161,7 @@ public struct Game: GameProtocol {
    public var nobles: [Noble] = []
    public var currentPlayer: Int = 0
    public var currentTurn: Int = 0
+   public var phase: GamePhase = .normalAction
 
    // Memoized canonical moves and legal move masks - should always be current and valid
    private var _allMoves: [Move] = []
@@ -177,7 +183,10 @@ public struct Game: GameProtocol {
          return nil
       }
 
-      self.supply = Dictionary(uniqueKeysWithValues: GemType.allCases.map { ($0, Game.GEM_SUPPLY_LIMIT) })
+      let gemsInSupply = playerCount == 2 ? 4 : 6
+      self.supply = Dictionary(uniqueKeysWithValues: GemType.allCases.map {
+         ($0, gemsInSupply)
+      })
 
       // Initialize nobles: select playerCount + 1 nobles randomly
       var allNobles = Noble.allNobles()
@@ -234,8 +243,15 @@ public struct Game: GameProtocol {
          (0..<4).map { position in Move.reserveCard(tier: tier, position: position) }
       })
 
-      // Pass move: 1 possible (always legal)
-      moves.append(Move.pass)
+      // Discard gem moves: 6 possible (one for each gem type including gold)
+      moves.append(contentsOf: [
+         Move.discardGem(.red),
+         Move.discardGem(.green),
+         Move.discardGem(.blue),
+         Move.discardGem(.white),
+         Move.discardGem(.brown),
+         Move.discardGoldGem
+      ])
 
       precondition(moves.count == Game.CANONICAL_MOVE_COUNT, "Canonical move count must be \(Game.CANONICAL_MOVE_COUNT)")
       return moves
@@ -247,16 +263,22 @@ public struct Game: GameProtocol {
 
       switch move {
       case .purchaseCard(let tier, let position):
+         // Only legal during normal action phase
+         guard phase == .normalAction else { return false }
          // Check if card exists at this position and the player can afford it
          guard tier < cardDecks.count && position < cardDecks[tier].count && position < 4 && position >= 0 else { return false }
          return player.canAfford(cost: cardDecks[tier][position].price)
 
       case .purchaseReservedCard(let position):
+         // Only legal during normal action phase
+         guard phase == .normalAction else { return false }
          // Check if player has a reserved card at this position
          guard position < player.reservedCards.count else { return false }
          return player.canAfford(cost: player.reservedCards[position].price)
 
       case .takeThreeGems(let gems):
+         // Only legal during normal action phase
+         guard phase == .normalAction else { return false }
          // Must be exactly 3 different gems
          guard gems.count == 3 && Set(gems).count == 3 else { return false }
          // Check supply has at least 1 of each
@@ -265,22 +287,29 @@ public struct Game: GameProtocol {
                return false
             }
          }
-         // Check player won't exceed gem limit (typically 10 total)
-         return player.gemCount + 3 <= Game.GEMS_PER_PLAYER_LIMIT
+         // No gem limit check - player can exceed 10 and will discard later
+         return true
 
       case .takeTwoGems(let gem):
-         // Check supply has at least 4 of this gem type, and player won't exceed gem limit
+         // Only legal during normal action phase
+         guard phase == .normalAction else { return false }
+         // Check supply has at least 4 of this gem type
          guard supply[gem, default: 0] >= 4 else { return false }
-         return player.gemCount + 2 <= Game.GEMS_PER_PLAYER_LIMIT
+         // No gem limit check - player can exceed 10 and will discard later
+         return true
 
       case .reserveCard(let tier, let position):
+         // Only legal during normal action phase
+         guard phase == .normalAction else { return false }
          // Check if card exists at this position and player has fewer than the limit
          guard tier < cardDecks.count && position < cardDecks[tier].count else { return false }
          return player.reservedCards.count < Game.RESERVED_CARDS_PER_PLAYER_LIMIT
 
-      case .pass:
-         // Pass is always legal
-         return true
+      case .discardGem(let gemType): // Only legal during discarding phase when over limit
+         return phase == .discarding && player.gemCount > Game.GEMS_PER_PLAYER_LIMIT && player.gems[gemType.rawValue] > 0
+
+      case .discardGoldGem: // Only legal during discarding phase when over limit
+         return phase == .discarding && player.gemCount > Game.GEMS_PER_PLAYER_LIMIT && player.goldGems > 0
       }
    }
 
@@ -349,6 +378,9 @@ public struct Game: GameProtocol {
 
    public mutating func applyMove (canonicalMoveIndex: Int) {
 
+      // Debug: uncomment to trace move application
+      // print("  Apply Move: player \(currentPlayer) move \(canonicalMoveIndex), phase \(phase)")
+
       // This function should never be called with an invalidate game state or invalid move,
       // we can check all these conditions with asserts that crash the program if they are violated
 
@@ -395,9 +427,7 @@ public struct Game: GameProtocol {
          awardAvailableNobles(toPlayer: playerIndex)
 
       case .takeThreeGems(let gems):
-         precondition(players[playerIndex].gemCount + 3 <= Game.GEMS_PER_PLAYER_LIMIT, "Player would exceed gem limit")
-
-         // Take gems from supply
+         // Take gems from supply (no limit check - may exceed 10)
          for gem in gems {
             precondition(supply[gem, default: 0] >= 1, "Insufficient gems in supply")
             supply[gem]! -= 1
@@ -406,9 +436,8 @@ public struct Game: GameProtocol {
 
       case .takeTwoGems(let gem):
          precondition(supply[gem, default: 0] >= 4, "Insufficient gems in supply")
-         precondition(players[playerIndex].gems[gem.rawValue] + 2 <= Game.GEMS_PER_PLAYER_LIMIT, "Player would exceed gem limit")
 
-         // Take 2 gems from supply
+         // Take 2 gems from supply (no limit check - may exceed 10)
          supply[gem]! -= 2
          players[playerIndex].gems[gem.rawValue] += 2
 
@@ -419,16 +448,42 @@ public struct Game: GameProtocol {
          let card = cardDecks[tier].remove(at: position)
          players[playerIndex].reservedCards.append(card)
 
-         // Give gold gem (if available - simplified, assumes unlimited gold)
+         // Give gold gem (if available - may exceed 10 gems total)
          players[playerIndex].goldGems += 1
 
-      case .pass:
-         // Do nothing, turn will advance automatically
-         break
+      case .discardGem(let gemType):
+         // Discard a gem and return it to supply
+         precondition(players[playerIndex].gems[gemType.rawValue] > 0, "Player has no \(gemType) gems to discard")
+         players[playerIndex].gems[gemType.rawValue] -= 1
+         supply[gemType, default: 0] += 1
+
+      case .discardGoldGem:
+         // Discard a gold gem and return it to supply
+         precondition(players[playerIndex].goldGems > 0, "Player has no gold gems to discard")
+         players[playerIndex].goldGems -= 1
       }
 
-      // Advance to next player (circular)
-      currentPlayer = (currentPlayer + 1) % players.count
+
+      // Handle phase transitions based on gem count
+      if phase == .normalAction {
+         // After a normal action, check if player exceeds gem limit
+         if players[playerIndex].gemCount > Game.GEMS_PER_PLAYER_LIMIT {
+            // Player must discard - stay on same player, enter discarding phase
+            phase = .discarding
+         } else {
+            // Player is within limit - advance to next player
+            currentPlayer = (currentPlayer + 1) % players.count
+            phase = .normalAction
+         }
+      } else if phase == .discarding {
+         // After discarding, check if player is now at or below limit
+         if players[playerIndex].gemCount <= Game.GEMS_PER_PLAYER_LIMIT {
+            // Player is done discarding - advance to next player, return to normal phase
+            currentPlayer = (currentPlayer + 1) % players.count
+            phase = .normalAction
+         }
+         // Otherwise stay in discarding phase with same player
+      }
 
       // Recompute legal move masks for all players
       _legalMoveMasks = (0..<players.count).map { playerIndex in
@@ -440,7 +495,7 @@ public struct Game: GameProtocol {
 
    // Encode game state as a fixed-size array of Float16
    // Size: 188 (4 players × 47) + 5 (supply) + 30 (5 nobles × 6) + 132 (3 tiers × 4 cards × 11) + 4 (current player one-hot) + 1 (turn) = 360
-   public static let ENCODED_SIZE = 360
+   public static let GAME_STATE_ENCODING_SIZE = 360
 
    public func encoding () -> [Float16] {
       var encoded: [Float16] = []
@@ -494,7 +549,7 @@ public struct Game: GameProtocol {
       // 1 current turn (normalized, assuming max 100 turns)
       encoded.append(Float16(self.currentTurn) / 100.0)
 
-      precondition(encoded.count == Game.ENCODED_SIZE, "Encoded size mismatch: expected \(Game.ENCODED_SIZE), got \(encoded.count)")
+      precondition(encoded.count == Game.GAME_STATE_ENCODING_SIZE, "Encoded size mismatch: expected \(Game.GAME_STATE_ENCODING_SIZE), got \(encoded.count)")
       return encoded
    }
 

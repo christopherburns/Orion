@@ -237,7 +237,7 @@ public class GamePrinter {
    }
 
    public static func presentPlayer (_ player: PlayerState, playerIndex: Int) {
-      print("\n\(bold)Player \(playerIndex + 1)\(reset)")
+      print("\n\(bold)Player \(playerIndex)\(reset)")
       print(String(repeating: "─", count: 80))
 
       if player.cards.isEmpty {
@@ -367,10 +367,94 @@ public class GamePrinter {
             print("\(turnPrefix)\(bold)Player \(playerIndex + 1)\(reset) attempts to reserve card (Tier \(tier + 1), Position \(position + 1))")
          }
 
-      case .pass:
-         print("\(turnPrefix)\(bold)Player \(playerIndex + 1)\(reset) passes")
+      case .discardGem(let gemType):
+         let colorCode = gemColor(gemType)
+         print("\(turnPrefix)\(bold)Player \(playerIndex + 1)\(reset) discards \(colorCode)\(gemType.stringValue)\(reset) gem")
+
+      case .discardGoldGem:
+         print("\(turnPrefix)\(bold)Player \(playerIndex + 1)\(reset) discards gold gem")
+
       }
    }
 
+   /// Print a bar graph showing move probabilities
+   /// - Parameters:
+   ///   - probabilities: Probability distribution over all moves (must sum to ~1.0)
+   ///   - game: Current game state (used to describe moves)
+   ///   - topN: Show only the top N moves (default: 10)
+   public static func presentMoveProbabilities (_ probabilities: [Float], game: Splendor.Game, topN: Int = 10) {
+      precondition(probabilities.count == game.canonicalMoveCount, "Probabilities must match canonical move count")
+
+      print("\n\(bold)Move Probabilities:\(reset)")
+
+      // Create array of (index, probability, move) tuples for non-zero probabilities
+      var movesWithProbs: [(index: Int, prob: Float, move: Splendor.Game.Move)] = []
+      for (index, prob) in probabilities.enumerated() {
+         if prob > 0.001 { // Only show moves with >0.1% probability
+            movesWithProbs.append((index, prob, game.move(atIndex: index)))
+         }
+      }
+
+      // Sort by probability descending
+      movesWithProbs.sort { $0.prob > $1.prob }
+
+      // Show top N moves
+      let maxWidth = 50 // Maximum bar width in characters
+      for (rank, item) in movesWithProbs.prefix(topN).enumerated() {
+         let percentage = item.prob * 100.0
+         let barWidth = Int(item.prob * Float(maxWidth))
+         let bar = String(repeating: "█", count: barWidth)
+         let paddedBar = bar.padding(toLength: maxWidth, withPad: " ", startingAt: 0)
+
+         // Get move description
+         let moveDesc = describeMoveShort(item.move, game: game)
+
+         // Print: rank. [bar] XX.X% - move description
+         let rankStr = String(format: "%2d", rank + 1)
+         let percentStr = String(format: "%5.1f", percentage)
+         print("\(rankStr). \(green)\(paddedBar)\(reset) \(percentStr)% - \(moveDesc)")
+      }
+
+      // Show total probability covered
+      let totalShown = movesWithProbs.prefix(topN).reduce(0.0) { $0 + $1.prob }
+      if movesWithProbs.count > topN {
+         print("    ... (\(movesWithProbs.count - topN) more moves, \(String(format: "%.1f", (1.0 - totalShown) * 100.0))% probability)")
+      }
+   }
+
+   /// Create a short description of a move
+   private static func describeMoveShort (_ move: Splendor.Game.Move, game: Splendor.Game) -> String {
+      switch move {
+      case .purchaseCard(let tier, let position):
+         if tier < game.cardDecks.count && position < game.cardDecks[tier].count {
+            let card = game.cardDecks[tier][position]
+            return "Buy \(card.color.stringValue) T\(tier+1) (\(card.points)pts)"
+         }
+         return "Buy T\(tier+1) P\(position+1)"
+
+      case .purchaseReservedCard(let position):
+         return "Buy reserved #\(position+1)"
+
+      case .takeThreeGems(let gems):
+         let gemNames = gems.map { $0.stringValue }.joined(separator: ", ")
+         return "Take 3: \(gemNames)"
+
+      case .takeTwoGems(let gem):
+         return "Take 2: \(gem.stringValue)"
+
+      case .reserveCard(let tier, let position):
+         if tier < game.cardDecks.count && position < game.cardDecks[tier].count {
+            let card = game.cardDecks[tier][position]
+            return "Reserve \(card.color.stringValue) T\(tier+1) (\(card.points)pts)"
+         }
+         return "Reserve T\(tier+1) P\(position+1)"
+
+      case .discardGem(let gemType):
+         return "Discard \(gemType.stringValue)"
+
+      case .discardGoldGem:
+         return "Discard gold"
+      }
+   }
 }
 

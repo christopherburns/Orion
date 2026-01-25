@@ -7,7 +7,8 @@ public protocol AgentProtocol {
    /// - Parameters:
    ///   - game: The current game state
    ///   - playerIndex: The index of the player whose turn it is
-   /// - Returns: Array of probabilities, one for each canonical move
-   func calculateMovePreferences (game: any GameProtocol, currentPlayerIndex: Int) -> [Float]
+   /// - Returns: Tuple of (policyLogits, valueEstimate) where policyLogits is an
+   ///   array of probabilities, one for each canonical move, and valueEstimate is a float between -1 and 1
+   func predict (game: any GameProtocol, currentPlayerIndex: Int) -> (policyLogits: [Float], valueEstimate: Float)
 }
 

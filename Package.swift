@@ -18,7 +18,7 @@ let package = Package(
    targets: [
       .target(
          name: "Core",
-         dependencies: [],
+         dependencies: ["Utility"],
          path: "src/core"
       ),
       .target(

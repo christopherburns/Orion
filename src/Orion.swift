@@ -5,35 +5,61 @@ import Core
 import Splendor
 import Utility
 
-
-
-
 @main
 struct Orion {
 
    static func registerOptions (opts: OptionParser) {
+
       opts.addOption("General", "s", "seed", "Seed for random number generator")
       opts.addOption("General", "p", "player-count", "Number of players")
       opts.addOption("General", "n", "game-count", "Number of games to play")
    }
 
-   static func sampleMove (validMoveMask: [Bool], movePreferences: [Float]) -> Int? {
-      precondition(validMoveMask.count == movePreferences.count, "Move mask and preferences must have same length")
+   /// Convert logits to probabilities by masking illegal moves and applying softmax
+   /// - Parameters:
+   ///   - logits: Raw network output logits for all moves
+   ///   - validMoveMask: Boolean mask indicating which moves are legal
+   /// - Returns: Probability distribution over all moves (illegal moves have probability 0), or nil if no legal moves
+   static func computeMoveProbabilities (logits: [Float], validMoveMask: [Bool]) -> [Float]? {
+      precondition(validMoveMask.count == logits.count, "Move mask and logits must have same length")
 
-      var bestIndex: Int? = nil
-      var bestScore: Float = Float.leastNormalMagnitude
-
+      // Mask illegal moves by setting their logits to -infinity
+      var maskedLogits = logits
       for (index, isValid) in validMoveMask.enumerated() {
-         if isValid {
-            let score = movePreferences[index]
-            if score > bestScore {
-               bestScore = score
-               bestIndex = index
-            }
+         if !isValid {
+            maskedLogits[index] = -Float.infinity
          }
       }
 
-      return bestIndex
+      // Apply softmax to get probabilities
+      // First find max for numerical stability
+      let maxLogit = maskedLogits.max() ?? -Float.infinity
+      guard maxLogit.isFinite else {
+         // All moves are illegal
+         return nil
+      }
+
+      // Compute exp(logit - maxLogit) for numerical stability
+      let expScores = maskedLogits.map { exp($0 - maxLogit) }
+      let sumExp = expScores.reduce(0.0, +)
+
+      // Return normalized probabilities
+      return expScores.map { $0 / sumExp }
+   }
+
+   /// Sample a move using greedy selection (argmax)
+   /// - Parameters:
+   ///   - validMoveMask: Boolean mask indicating which moves are legal
+   ///   - movePreferences: Raw logits from the neural network
+   /// - Returns: Index of the best move, or nil if no legal moves
+   static func sampleMove (validMoveMask: [Bool], movePreferences: [Float]) -> Int? {
+      guard let probabilities = computeMoveProbabilities(logits: movePreferences, validMoveMask: validMoveMask) else {
+         return nil
+      }
+
+      // For now, use greedy selection (argmax)
+      // TODO: Add temperature-based sampling for training
+      return probabilities.enumerated().max(by: { $0.1 < $1.1 })?.0
    }
 
    static func showGameState (game: Splendor.Game) {
@@ -42,7 +68,6 @@ struct Orion {
          GamePrinter.presentPlayer(player, playerIndex: index)
       }
    }
-
 
    static func playGame (playerCount: Int, silence: Bool, seed: UInt64) -> (GameTerminalCondition, Int) {
 
@@ -56,17 +81,64 @@ struct Orion {
       }
 
       // Instantiate agent
-      let agent = DumbAgent(prngSeed: seed)
+      //let agent = DumbAgent(prngSeed: seed)
+      let agent = SplendorNeuralAgent()
+
+      // Track move statistics
+      var moveTypeCounts: [String: Int] = [
+         "purchase": 0,
+         "purchaseReserved": 0,
+         "takeThreeGems": 0,
+         "takeTwoGems": 0,
+         "reserve": 0,
+         "discard": 0
+      ]
 
       // Game loop
       var turnCount = 0
-      while case .inProgress = g.terminalCondition {
-         let validMoveMask = g.legalMoveMaskForCurrentPlayer()
-         let movePreferences = agent.calculateMovePreferences(game: g, currentPlayerIndex: g.currentPlayer)
+      let maxTurns = 1000 // Prevent infinite loops with untrained networks
 
-         guard let moveIndex = self.sampleMove(validMoveMask: validMoveMask, movePreferences: movePreferences) else {
-            print("Error: No valid moves available for player \(g.currentPlayer)")
+      while case .inProgress = g.terminalCondition {
+         if turnCount >= maxTurns {
+            print("Warning: Game reached maximum turn limit (\(maxTurns))")
             break
+         }
+
+         let validMoveMask = g.legalMoveMaskForCurrentPlayer()
+         let (policyLogits, _) = agent.predict(game: g, currentPlayerIndex: g.currentPlayer)
+
+         if !silence {
+            if let probabilities = computeMoveProbabilities(logits: policyLogits, validMoveMask: validMoveMask) {
+               GamePrinter.presentMoveProbabilities(probabilities, game: g, topN: 10)
+            }
+         }
+
+         guard let moveIndex = self.sampleMove(validMoveMask: validMoveMask, movePreferences: policyLogits) else {
+            print("Error: No valid moves available for player \(g.currentPlayer)")
+            print("Valid move mask: \(validMoveMask)")
+            print("All false? \(validMoveMask.allSatisfy { !$0 })")
+            print("   Game phase: \(g.phase)")
+            print("   Game state:")
+            print("      Players:")
+            GamePrinter.present(g)
+            GamePrinter.presentPlayer(g.players[g.currentPlayer], playerIndex: g.currentPlayer)
+            preconditionFailure("No valid moves available for player \(g.currentPlayer)")
+            break
+         }
+
+         // Track move type
+         if moveIndex < 12 {
+            moveTypeCounts["purchase"]! += 1
+         } else if moveIndex < 15 {
+            moveTypeCounts["purchaseReserved"]! += 1
+         } else if moveIndex < 25 {
+            moveTypeCounts["takeThreeGems"]! += 1
+         } else if moveIndex < 30 {
+            moveTypeCounts["takeTwoGems"]! += 1
+         } else if moveIndex < 42 {
+            moveTypeCounts["reserve"]! += 1
+         } else {
+            moveTypeCounts["discard"]! += 1
          }
 
          g.applyMove(canonicalMoveIndex: moveIndex)
@@ -75,6 +147,15 @@ struct Orion {
          if !silence {
             GamePrinter.presentMove(moveIndex: moveIndex, game: g)
             showGameState(game: g)
+         }
+      }
+
+      // Print move statistics
+      if !silence {
+         print("\n\u{001B}[1mMove Statistics:\u{001B}[0m")
+         for (moveType, count) in moveTypeCounts.sorted(by: { $0.key < $1.key }) {
+            let percentage = Float(count) / Float(turnCount) * 100.0
+            print("  \(moveType): \(count) (\(String(format: "%.1f", percentage))%)")
          }
       }
 
