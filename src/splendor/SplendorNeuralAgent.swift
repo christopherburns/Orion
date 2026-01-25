@@ -30,14 +30,14 @@ public struct ModelMetadata: Codable {
 
 /// Neural network for Splendor game playing
 /// Architecture:
-///   Input (360) -> Dense(512) -> Dense(512) -> Dense(256) -> Policy Head (48) + Value Head (1)
+///   Input (361) -> Dense(512) -> Dense(512) -> Dense(256) -> Policy Head (48) + Value Head (1)
 class PolicyValueNetwork: Module {
 
-   static let INPUT_DIMENSIONS = 360 // Matches game's state embedding size
+   static let INPUT_DIMENSIONS = 361 // Matches game's state embedding size (updated for gold gem supply)
    static let POLICY_DIMENSIONS = 48 // Matches game's move space (42 normal + 6 discard)
 
    // Current architecture version - increment when architecture changes
-   static let ARCHITECTURE_VERSION = 2
+   static let ARCHITECTURE_VERSION = 3
 
    // Shared trunk layers
    let dense1: Linear
@@ -96,10 +96,10 @@ class PolicyValueNetwork: Module {
    }
 
    /// Forward pass through the network
-   /// - Parameter x: Input tensor of shape [batchSize, 360]
-   /// - Returns: Tuple of (policy_logits, value) where policy_logits is [batchSize, 43] and value is [batchSize, 1]
+   /// - Parameter x: Input tensor of shape [batchSize, 361]
+   /// - Returns: Tuple of (policy_logits, value) where policy_logits is [batchSize, 48] and value is [batchSize, 1]
    func execute (_ x: MLXArray) -> (policyLogits: MLXArray, value: MLXArray) {
-      precondition(x.shape.count == 2, "Input must have shape [batchSize, 360]")
+      precondition(x.shape.count == 2, "Input must have shape [batchSize, 361]")
       precondition(x.shape[1] == PolicyValueNetwork.INPUT_DIMENSIONS, "Input must have \(PolicyValueNetwork.INPUT_DIMENSIONS) features")
 
       // Shared trunk with ReLU activations
@@ -285,13 +285,13 @@ public class SplendorNeuralAgent: AgentProtocol {
       // Get the encoded game state, convert to Float array
       let encodedState = splendorGame.encoding().map { Float($0) }
 
-      // Create MLX array with shape [1, 360]
+      // Create MLX array with shape [1, 361]
       let inputArray = MLXArray(encodedState).reshaped([1, PolicyValueNetwork.INPUT_DIMENSIONS])
 
       // Run inference
       let (policyLogits, value) = network.execute(inputArray)
 
-      // Policy logits should have shape [1, 43]
+      // Policy logits should have shape [1, 48]
       precondition(policyLogits.ndim == 2, "Policy logits must be 2D, got \(policyLogits.ndim)D")
       precondition(policyLogits.shape[1] == PolicyValueNetwork.POLICY_DIMENSIONS, "Policy logits must have \(PolicyValueNetwork.POLICY_DIMENSIONS) moves, got \(policyLogits.shape[1])")
 
@@ -299,14 +299,13 @@ public class SplendorNeuralAgent: AgentProtocol {
       precondition(value.ndim == 2, "Value must be 2D, got \(value.ndim)D")
       precondition(value.shape[1] == 1, "Value must have 1 element in second dimension, got \(value.shape[1])")
 
-      // Convert policy logits to Swift array - extract the single batch element
-      let logitsArray = policyLogits[0]  // Extract [43] from [1, 43]
-      let policyResult: [Float] = (0..<PolicyValueNetwork.POLICY_DIMENSIONS).map { index in
-         Float(logitsArray[index].item(Float.self))
-      }
+      // Convert policy logits to Swift array efficiently (single eval + device sync)
+      let logitsArray = policyLogits[0]  // Extract [48] from [1, 48]
+      let policyResult = logitsArray.asArray(Float.self)
 
-      // Extract value estimate (already in [-1, 1] range from tanh activation)
-      let valueEstimate = Float(value[0, 0].item(Float.self))
+      // Extract value estimate efficiently (already in [-1, 1] range from tanh activation)
+      let valueArray = value.asArray(Float.self)
+      let valueEstimate = valueArray[0]
 
       return (policyResult, valueEstimate)
    }

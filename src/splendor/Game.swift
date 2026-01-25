@@ -158,6 +158,7 @@ public struct Game: GameProtocol {
    public var cardDecks: [[Card]] = [[], [], []]
    public var players: [PlayerState]
    public var supply: [GemType: Int] = [:]
+   public var goldGemSupply: Int = 5  // Gold gems available in supply (standard Splendor has 5)
    public var nobles: [Noble] = []
    public var currentPlayer: Int = 0
    public var currentTurn: Int = 0
@@ -281,14 +282,9 @@ public struct Game: GameProtocol {
          guard phase == .normalAction else { return false }
          // Must be exactly 3 different gems
          guard gems.count == 3 && Set(gems).count == 3 else { return false }
-         // Check supply has at least 1 of each
-         for gem in gems {
-            if supply[gem, default: 0] < 1 {
-               return false
-            }
-         }
-         // No gem limit check - player can exceed 10 and will discard later
+         // Always legal - player can take 0 gems if all colors depleted (effectively a pass)
          return true
+
 
       case .takeTwoGems(let gem):
          // Only legal during normal action phase
@@ -427,11 +423,12 @@ public struct Game: GameProtocol {
          awardAvailableNobles(toPlayer: playerIndex)
 
       case .takeThreeGems(let gems):
-         // Take gems from supply (no limit check - may exceed 10)
+         // Take gems from supply (only from colors that have supply available)
          for gem in gems {
-            precondition(supply[gem, default: 0] >= 1, "Insufficient gems in supply")
-            supply[gem]! -= 1
-            players[playerIndex].gems[gem.rawValue] += 1
+            if supply[gem, default: 0] >= 1 {
+               supply[gem]! -= 1
+               players[playerIndex].gems[gem.rawValue] += 1
+            }
          }
 
       case .takeTwoGems(let gem):
@@ -448,8 +445,11 @@ public struct Game: GameProtocol {
          let card = cardDecks[tier].remove(at: position)
          players[playerIndex].reservedCards.append(card)
 
-         // Give gold gem (if available - may exceed 10 gems total)
-         players[playerIndex].goldGems += 1
+         // Give gold gem only if available in supply (may exceed 10 gems total)
+         if goldGemSupply > 0 {
+            goldGemSupply -= 1
+            players[playerIndex].goldGems += 1
+         }
 
       case .discardGem(let gemType):
          // Discard a gem and return it to supply
@@ -461,6 +461,7 @@ public struct Game: GameProtocol {
          // Discard a gold gem and return it to supply
          precondition(players[playerIndex].goldGems > 0, "Player has no gold gems to discard")
          players[playerIndex].goldGems -= 1
+         goldGemSupply += 1
       }
 
 
@@ -494,8 +495,8 @@ public struct Game: GameProtocol {
    }
 
    // Encode game state as a fixed-size array of Float16
-   // Size: 188 (4 players × 47) + 5 (supply) + 30 (5 nobles × 6) + 132 (3 tiers × 4 cards × 11) + 4 (current player one-hot) + 1 (turn) = 360
-   public static let GAME_STATE_ENCODING_SIZE = 360
+   // Size: 188 (4 players × 47) + 5 (supply) + 1 (gold supply) + 30 (5 nobles × 6) + 132 (3 tiers × 4 cards × 11) + 4 (current player one-hot) + 1 (turn) = 361
+   public static let GAME_STATE_ENCODING_SIZE = 361
 
    public func encoding () -> [Float16] {
       var encoded: [Float16] = []
@@ -514,6 +515,9 @@ public struct Game: GameProtocol {
       for gemType in GemType.allCases {
          encoded.append(Float16(self.supply[gemType] ?? 0) / 6.0)
       }
+
+      // 1 gold gem supply count
+      encoded.append(Float16(self.goldGemSupply) / 5.0)
 
       // 5 available nobles × 6 floats each (1 point + 5 price)
       for i in 0..<5 {

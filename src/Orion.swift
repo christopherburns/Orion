@@ -350,9 +350,8 @@ struct GameplayTester {
       var playerWinCounts: [Int: Int] = [:]
       var tiedCount = 0
       for gameIndex in 0..<gameCount {
-         print("Playing game \(gameIndex+1) of \(gameCount)")
          let (terminalCondition, turnCount) = self.playGame(playerCount: playerCount, silence: silence, seed: seed+UInt64(gameIndex), agents: agents)
-         print("    Turn count: \(turnCount)")
+         print("Completed game \(gameIndex) in \(turnCount) turns, \(terminalCondition)")
          gameResults.append((terminalCondition, turnCount))
          totalTurnCount += turnCount
          switch terminalCondition {
