@@ -209,29 +209,6 @@ public struct DataGenerator {
    }
 
 
-   /// Initialize a single agent for self-play
-   /// - Parameters:
-   ///   - modelPath: Optional path to model file
-   ///   - seed: Random seed for uninitialized networks
-   /// - Returns: An agent for self-play
-   static func initializeAgent (modelPath: String?, seed: UInt64) -> any AgentProtocol {
-      if let path = modelPath {
-         let modelURL = URL(fileURLWithPath: path)
-         do {
-            let agent = try SplendorNeuralAgent(url: modelURL)
-            print("Loaded neural agent from \(path)")
-            return agent
-         } catch {
-            print("Error: Failed to load model from \(path): \(error)")
-            print("Falling back to uninitialized neural agent")
-            return SplendorNeuralAgent(seed: seed)
-         }
-      } else {
-         print("Using uninitialized neural agent (seed: \(seed))")
-         return SplendorNeuralAgent(seed: seed)
-      }
-   }
-
    /// Play a self-play game and collect training examples
    /// - Parameters:
    ///   - playerCount: Number of players in the game
@@ -363,8 +340,11 @@ public struct DataGenerator {
       print("  Base seed: \(baseSeed)")
       print("  Output: \(outputPath)")
 
-      // Initialize agent for self-play
-      let agent = initializeAgent(modelPath: modelPath, seed: baseSeed)
+      // Initialize agent for self-play using shared function
+      // Pass the model path or "uninitialized" as a single-element array
+      let agentSpec = modelPath ?? "uninitialized"
+      let agents = initializeAgents(playerCount: 1, agentSpecs: [agentSpec], seed: baseSeed)
+      let agent = agents[0]  // Extract the single agent for self-play
 
       // Generate games and collect training data
       var allGameData: [GameData] = []
