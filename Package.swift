@@ -43,7 +43,7 @@ let package = Package(
             .product(name: "MLXNN", package: "mlx-swift"),
             .product(name: "MLXOptimizers", package: "mlx-swift")],
          path: "src",
-         sources: ["Orion.swift"]
+         sources: ["Orion.swift", "GameplayTester.swift", "DataGenerator.swift", "NetworkTrainer.swift", "Common.swift"]
       ),
    ]
 )
