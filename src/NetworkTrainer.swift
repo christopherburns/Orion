@@ -92,13 +92,22 @@ public struct NetworkTrainer {
    }
 
    /// Compute policy loss (cross-entropy between predicted and target distributions)
-   static func policyLoss (predicted: MLXArray, target: MLXArray) -> MLXArray {
+   /// Weighted by value targets: only learn from winning moves (weight=1.0), ignore losing/tied moves (weight=0.0)
+   static func policyLoss (predicted: MLXArray, target: MLXArray, valueWeights: MLXArray) -> MLXArray {
       // predicted: [batchSize, 48] logits
       // target: [batchSize, 48] probabilities
-      // Cross-entropy: -sum(target * log(softmax(predicted)))
+      // valueWeights: [batchSize, 1] - value targets in [-1, 1] range
+      // Cross-entropy per example: -sum(target * log(softmax(predicted)))
       let logProbs = logSoftmax(predicted, axis: -1)
-      let loss = -mean(sum(target * logProbs, axis: -1))
-      return loss
+      let perExampleLoss = -sum(target * logProbs, axis: -1)  // [batchSize]
+      // Weight by value: (value + 1) / 2 maps [-1, 1] to [0, 1]
+      //    value=+1.0 → weight=1.0 (learn from winning moves)
+      //    value=-1.0 → weight=0.0 (ignore losing moves)
+      //    value=0.0  → weight=0.5 (half-weight for tied games)
+      let weights = ((valueWeights + 1.0) / 2.0).squeezed(axis: -1)  // [batchSize]
+      let weightedLoss = perExampleLoss * weights  // [batchSize]
+      // Average weighted loss (mean handles zero weights correctly)
+      return mean(weightedLoss)
    }
 
    /// Compute value loss (MSE between predicted and target values)
@@ -125,7 +134,7 @@ public struct NetworkTrainer {
          let policyTargets = arrays[1]
          let valueTargets = arrays[2]
          let (p, v) = model.execute(states)
-         let pl = policyLoss(predicted: p, target: policyTargets)
+         let pl = policyLoss(predicted: p, target: policyTargets, valueWeights: valueTargets)
          let vl = valueLoss(predicted: v, target: valueTargets)
          return [policyWeight * pl + valueWeight * vl]
       }
@@ -267,7 +276,7 @@ public struct NetworkTrainer {
             let valValueTargets = MLXArray(valBatch.map { $0.value }).reshaped([valBatch.count, 1])
 
             let (valPolicyLogits, valValuePred) = network.execute(valStates)
-            let valPolLoss = policyLoss(predicted: valPolicyLogits, target: valPolicyTargets)
+            let valPolLoss = policyLoss(predicted: valPolicyLogits, target: valPolicyTargets, valueWeights: valValueTargets)
             let valValLoss = valueLoss(predicted: valValuePred, target: valValueTargets)
             let valTotalLoss = policyWeight * valPolLoss + valueWeight * valValLoss
 
