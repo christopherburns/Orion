@@ -5,7 +5,7 @@ import Splendor
 import Utility
 
 /// A single training example collected during a game
-struct TrainingExample: Codable {
+public struct TrainingExample: Codable {
    let turnNumber: Int
    let playerIndex: Int
    let state: [Float]  // 361-dimensional game state encoding
@@ -14,7 +14,7 @@ struct TrainingExample: Codable {
 }
 
 /// Data from a single self-play game
-struct GameData: Codable {
+public struct GameData: Codable {
    let gameIndex: Int
    let seed: UInt64
    let playerCount: Int
@@ -27,7 +27,7 @@ struct GameData: Codable {
       case gameIndex, seed, playerCount, winner, turnCount, examples, moves
    }
 
-   func encode (to encoder: Encoder) throws {
+   public func encode (to encoder: Encoder) throws {
       var container = encoder.container(keyedBy: CodingKeys.self)
       try container.encode(gameIndex, forKey: .gameIndex)
       try container.encode(seed, forKey: .seed)
@@ -41,7 +41,7 @@ struct GameData: Codable {
       try container.encode(movesArray, forKey: .moves)
    }
 
-   init (from decoder: Decoder) throws {
+   public init (from decoder: Decoder) throws {
       let container = try decoder.container(keyedBy: CodingKeys.self)
       gameIndex = try container.decode(Int.self, forKey: .gameIndex)
       seed = try container.decode(UInt64.self, forKey: .seed)
@@ -54,7 +54,7 @@ struct GameData: Codable {
       moves = movesArray.map { (playerIndex: $0["player"]!, moveIndex: $0["move"]!) }
    }
 
-   init (gameIndex: Int, seed: UInt64, playerCount: Int, winner: Int?, turnCount: Int, examples: [TrainingExample], moves: [(playerIndex: Int, moveIndex: Int)]) {
+   public init (gameIndex: Int, seed: UInt64, playerCount: Int, winner: Int?, turnCount: Int, examples: [TrainingExample], moves: [(playerIndex: Int, moveIndex: Int)]) {
       self.gameIndex = gameIndex
       self.seed = seed
       self.playerCount = playerCount
@@ -66,7 +66,7 @@ struct GameData: Codable {
 }
 
 /// Container for all training data
-struct TrainingDataset: Codable {
+public struct TrainingDataset: Codable {
    let generatedAt: String
    let modelPath: String?
    let temperature: Float
@@ -200,7 +200,15 @@ public struct DataGenerator {
 
    static func registerOptions (opts: OptionParser) {
       opts.addOption("Data Generator", "g", "game-count", "Number of self-play games to generate")
-      opts.addOption("Data Generator", "m", "model", "Path to model file in models/ directory (default: untrained)")
+      opts.addOption("Gameplay Tester", "a", "agent", "Path to model file, or name of non-model-based agent (optional, default is 'random')",
+         longDoc:
+            "Specifies which agent(s) to use for gameplay. " +
+            "If a path to a model file is provided (e.g., 'models/best.mlx'), " +
+            "a neural network agent will be loaded from that file. " +
+            "Alternatively, you can specify 'random' to use a random agent " +
+            "that makes valid moves uniformly at random (default). " +
+            "The model file path can be relative to the current working " +
+            "directory or an absolute path.")
       opts.addOption("Data Generator", "o", "output", "Output file path for training data (default: training_data/data_TIMESTAMP.json)")
       opts.addOption("Data Generator", "p", "player-count", "Number of players (default: 2)")
       opts.addOption("Data Generator", "s", "seed", "Random seed for game generation (default: random)")

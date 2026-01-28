@@ -3,6 +3,11 @@ import Foundation
 import Core
 import Splendor
 import Utility
+import MLX
+import MLXNN
+import MLXOptimizers
+
+// Note: Uses loadOrCreateNetwork from Common.swift
 
 public struct NetworkTrainer {
 
@@ -21,13 +26,314 @@ public struct NetworkTrainer {
       opts.addOption("Network Trainer", "vloss", "value-loss-weight", "Weight for value loss (default: 1.0)")
    }
 
+   /// Load or create a PolicyValueNetwork with metadata
+   /// - Parameters:
+   ///   - modelPath: Optional path to model file. If nil, creates new untrained model
+   ///   - seed: Random seed for new model initialization (ignored if loading)
+   /// - Returns: Tuple of (network, metadata)
+   /// - Throws: Errors from file operations or model loading
+   static func loadOrCreateNetwork (modelPath: String?, seed: UInt64) throws -> (network: PolicyValueNetwork, metadata: ModelMetadata) {
+      if let modelPath = modelPath {
+         return try PolicyValueNetwork.load(from: URL(fileURLWithPath: modelPath))
+      } else {
+         let network = PolicyValueNetwork(seed: seed)
+         let metadata = ModelMetadata(
+            version: "0.1.0",
+            architectureVersion: PolicyValueNetwork.ARCHITECTURE_VERSION,
+            createdAt: Date()
+         )
+         return (network, metadata)
+      }
+   }
+
+   /// Load training dataset from file or directory
+   static func loadTrainingData (from path: String) throws -> TrainingDataset {
+      let url = URL(fileURLWithPath: path)
+      var fileURLs: [URL] = []
+
+      var isDirectory: ObjCBool = false
+      if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) {
+         if isDirectory.boolValue {
+            // Load all JSON files from directory
+            let files = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
+            fileURLs = files.filter { $0.pathExtension == "json" }
+         } else {
+            // Single file
+            fileURLs = [url]
+         }
+      } else {
+         throw NSError(domain: "NetworkTrainer", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "Training data path does not exist: \(path)"])
+      }
+
+      guard !fileURLs.isEmpty else {
+         throw NSError(domain: "NetworkTrainer", code: 2,
+                      userInfo: [NSLocalizedDescriptionKey: "No JSON files found in: \(path)"])
+      }
+
+      // Load and merge all datasets
+      var allGames: [GameData] = []
+      for fileURL in fileURLs {
+         let data = try Data(contentsOf: fileURL)
+         let dataset = try JSONDecoder().decode(TrainingDataset.self, from: data)
+         allGames.append(contentsOf: dataset.games)
+      }
+
+      // Create merged dataset
+      let totalExamples = allGames.reduce(0) { $0 + $1.examples.count }
+      return TrainingDataset(
+         generatedAt: Date().iso8601,
+         modelPath: nil,
+         temperature: 0.0, // Not meaningful for merged dataset
+         totalGames: allGames.count,
+         totalExamples: totalExamples,
+         games: allGames
+      )
+   }
+
+   /// Compute policy loss (cross-entropy between predicted and target distributions)
+   static func policyLoss (predicted: MLXArray, target: MLXArray) -> MLXArray {
+      // predicted: [batchSize, 48] logits
+      // target: [batchSize, 48] probabilities
+      // Cross-entropy: -sum(target * log(softmax(predicted)))
+      let logProbs = logSoftmax(predicted, axis: -1)
+      let loss = -mean(sum(target * logProbs, axis: -1))
+      return loss
+   }
+
+   /// Compute value loss (MSE between predicted and target values)
+   static func valueLoss (predicted: MLXArray, target: MLXArray) -> MLXArray {
+      // predicted: [batchSize, 1] values
+      // target: [batchSize, 1] values
+      let diff = predicted - target
+      return mean(diff * diff)
+   }
+
+   /// Training step: forward pass, compute loss, backward pass
+   static func trainingStep (
+      network: PolicyValueNetwork,
+      optimizer: Optimizer,
+      states: MLXArray,
+      policyTargets: MLXArray,
+      valueTargets: MLXArray,
+      policyWeight: Float,
+      valueWeight: Float) -> Float {
+
+      // Create valueAndGrad function
+      let vg = valueAndGrad(model: network) { model, arrays in
+         let states = arrays[0]
+         let policyTargets = arrays[1]
+         let valueTargets = arrays[2]
+         let (p, v) = model.execute(states)
+         let pl = policyLoss(predicted: p, target: policyTargets)
+         let vl = valueLoss(predicted: v, target: valueTargets)
+         return [policyWeight * pl + valueWeight * vl]
+      }
+
+      // Call the gradient function (computes loss and gradients)
+      let (lossArray, grads) = vg(network, [states, policyTargets, valueTargets])
+      let totalLoss = lossArray[0]
+
+      // Update parameters
+      optimizer.update(model: network, gradients: grads)
+
+      // Return total loss as Float
+      return Float(totalLoss.item(Float.self))
+   }
+
+   /// Create optimizer based on name
+   static func createOptimizer (name: String, learningRate: Float) -> Optimizer {
+      switch name.lowercased() {
+      case "adam":
+         return Adam(learningRate: learningRate)
+      case "sgd":
+         return SGD(learningRate: learningRate)
+      default:
+         print("Warning: Unknown optimizer '\(name)', defaulting to Adam")
+         return Adam(learningRate: learningRate)
+      }
+   }
+
    public static func main () throws {
       let opts = OptionParser(help: "Train a neural network model on training data")
       self.registerOptions(opts: opts)
-      // parse the command line arguments, now that all options are registered
       opts.parse(tokens: CommandLine.arguments, failOnUnknownOption: true, ignoreHelp: false)
 
-      let gameCount = opts.get(option: "game-count", orElse: 1)
-      print("Training network for \(gameCount) games")
+      // Parse command-line options
+      guard let inputPath = opts.get(option: "input") as String? else {
+         print("Error: --input is required")
+         print("Use --help for usage information")
+         return
+      }
+
+      let modelPath = opts.get(option: "model") as String?
+      let outputPath = opts.get(option: "output") as String?
+      let seed = opts.get(option: "seed", orElse: UInt64(42))
+      let batchSize = opts.get(option: "batch-size", orElse: 256)
+      let epochs = opts.get(option: "epochs", orElse: 10)
+      let learningRate = opts.get(option: "learning-rate", orElse: Float(0.001))
+      let validationSplit = opts.get(option: "validation-split", orElse: Float(0.1))
+      let saveInterval = opts.get(option: "save-interval", orElse: 5)
+      let optimizerName = opts.get(option: "optimizer", orElse: "adam")
+      let policyWeight = opts.get(option: "policy-loss-weight", orElse: Float(1.0))
+      let valueWeight = opts.get(option: "value-loss-weight", orElse: Float(1.0))
+
+      print("Loading training data from: \(inputPath)")
+      let dataset = try loadTrainingData(from: inputPath)
+      print("Loaded \(dataset.totalGames) games with \(dataset.totalExamples) total examples")
+
+      // Flatten all examples from all games
+      var allExamples: [TrainingExample] = []
+      for game in dataset.games {
+         allExamples.append(contentsOf: game.examples)
+      }
+
+      // Shuffle examples
+      allExamples.shuffle()
+
+      // Split into training and validation sets
+      let validationCount = Int(Float(allExamples.count) * validationSplit)
+      let validationExamples = Array(allExamples.prefix(validationCount))
+      let trainingExamples = Array(allExamples.suffix(allExamples.count - validationCount))
+
+      print("Training set: \(trainingExamples.count) examples")
+      print("Validation set: \(validationExamples.count) examples")
+
+      // Initialize or load network
+      if let modelPath = modelPath {
+         print("Loading model from: \(modelPath)")
+      } else {
+         print("Creating new untrained model")
+      }
+      let (network, metadata) = try loadOrCreateNetwork(modelPath: modelPath, seed: seed)
+
+      // Create optimizer
+      let optimizer = createOptimizer(name: optimizerName, learningRate: learningRate)
+      print("Using optimizer: \(optimizerName) with learning rate: \(learningRate)")
+
+      // Training loop
+      print("\nStarting training...")
+      var bestValidationLoss = Float.infinity
+      var epochLosses: [Float] = []
+
+      for epoch in 1...epochs {
+         // Shuffle training data each epoch
+         var shuffledTraining = trainingExamples
+         shuffledTraining.shuffle()
+
+         var epochLoss: Float = 0.0
+         var batchCount = 0
+
+         // Process in batches
+         for batchStart in stride(from: 0, to: shuffledTraining.count, by: batchSize) {
+            let batchEnd = min(batchStart + batchSize, shuffledTraining.count)
+            let batch = Array(shuffledTraining[batchStart..<batchEnd])
+
+            // Prepare batch data - flatten arrays and reshape
+            let statesFlat = batch.flatMap { $0.state }
+            let states = MLXArray(statesFlat).reshaped([batch.count, PolicyValueNetwork.INPUT_DIMENSIONS])
+            let policyFlat = batch.flatMap { $0.policy }
+            let policyTargets = MLXArray(policyFlat).reshaped([batch.count, PolicyValueNetwork.POLICY_DIMENSIONS])
+            let valueTargets = MLXArray(batch.map { $0.value }).reshaped([batch.count, 1])
+
+            // Training step
+            let loss = trainingStep(
+               network: network,
+               optimizer: optimizer,
+               states: states,
+               policyTargets: policyTargets,
+               valueTargets: valueTargets,
+               policyWeight: policyWeight,
+               valueWeight: valueWeight)
+
+            epochLoss += loss
+            batchCount += 1
+         }
+
+         let avgEpochLoss = epochLoss / Float(batchCount)
+         epochLosses.append(avgEpochLoss)
+
+         // Validation
+         var validationLoss: Float = 0.0
+         var valBatchCount = 0
+         for valBatchStart in stride(from: 0, to: validationExamples.count, by: batchSize) {
+            let valBatchEnd = min(valBatchStart + batchSize, validationExamples.count)
+            let valBatch = Array(validationExamples[valBatchStart..<valBatchEnd])
+
+            let valStatesFlat = valBatch.flatMap { $0.state }
+            let valStates = MLXArray(valStatesFlat).reshaped([valBatch.count, PolicyValueNetwork.INPUT_DIMENSIONS])
+            let valPolicyFlat = valBatch.flatMap { $0.policy }
+            let valPolicyTargets = MLXArray(valPolicyFlat).reshaped([valBatch.count, PolicyValueNetwork.POLICY_DIMENSIONS])
+            let valValueTargets = MLXArray(valBatch.map { $0.value }).reshaped([valBatch.count, 1])
+
+            let (valPolicyLogits, valValuePred) = network.execute(valStates)
+            let valPolLoss = policyLoss(predicted: valPolicyLogits, target: valPolicyTargets)
+            let valValLoss = valueLoss(predicted: valValuePred, target: valValueTargets)
+            let valTotalLoss = policyWeight * valPolLoss + valueWeight * valValLoss
+
+            validationLoss += Float(valTotalLoss.item(Float.self))
+            valBatchCount += 1
+         }
+
+         let avgValidationLoss = validationLoss / Float(valBatchCount)
+
+         print("Epoch \(epoch)/\(epochs): Train Loss = \(String(format: "%.6f", avgEpochLoss)), Val Loss = \(String(format: "%.6f", avgValidationLoss))")
+
+         // Track best model
+         if avgValidationLoss < bestValidationLoss {
+            bestValidationLoss = avgValidationLoss
+         }
+
+         // Save checkpoint
+         if epoch % saveInterval == 0 || epoch == epochs {
+            let checkpointPath = outputPath ?? "models/checkpoint_epoch\(epoch).mlx"
+            let checkpointURL = URL(fileURLWithPath: checkpointPath)
+
+            // Create directory if needed
+            try FileManager.default.createDirectory(at: checkpointURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
+
+            let checkpointMetadata = ModelMetadata(
+               version: metadata.version,
+               architectureVersion: metadata.architectureVersion,
+               createdAt: metadata.createdAt,
+               trainingEpochs: epoch,
+               trainingLoss: avgValidationLoss,
+               description: metadata.description,
+               checksum: metadata.checksum
+            )
+
+            try network.save(to: checkpointURL, metadata: checkpointMetadata)
+            print("Saved checkpoint to: \(checkpointPath)")
+         }
+      }
+
+      // Save final model
+      if let outputPath = outputPath {
+         let outputURL = URL(fileURLWithPath: outputPath)
+         try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
+
+         let finalMetadata = ModelMetadata(
+            version: metadata.version,
+            architectureVersion: metadata.architectureVersion,
+            createdAt: metadata.createdAt,
+            trainingEpochs: epochs,
+            trainingLoss: bestValidationLoss,
+            description: metadata.description,
+            checksum: metadata.checksum
+         )
+
+         try network.save(to: outputURL, metadata: finalMetadata)
+         print("\nTraining complete! Final model saved to: \(outputPath)")
+         print("Best validation loss: \(String(format: "%.6f", bestValidationLoss))")
+      }
+   }
+}
+
+// Helper extension for Date ISO8601 formatting
+extension Date {
+   var iso8601: String {
+      let formatter = ISO8601DateFormatter()
+      formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+      return formatter.string(from: self)
    }
 }

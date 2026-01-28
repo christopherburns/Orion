@@ -31,13 +31,13 @@ public struct ModelMetadata: Codable {
 /// Neural network for Splendor game playing
 /// Architecture:
 ///   Input (361) -> Dense(512) -> Dense(512) -> Dense(256) -> Policy Head (48) + Value Head (1)
-class PolicyValueNetwork: Module {
+public class PolicyValueNetwork: Module {
 
-   static let INPUT_DIMENSIONS = 361 // Matches game's state embedding size (updated for gold gem supply)
-   static let POLICY_DIMENSIONS = 48 // Matches game's move space (42 normal + 6 discard)
+   public static let INPUT_DIMENSIONS = 361 // Matches game's state embedding size (updated for gold gem supply)
+   public static let POLICY_DIMENSIONS = 48 // Matches game's move space (42 normal + 6 discard)
 
    // Current architecture version - increment when architecture changes
-   static let ARCHITECTURE_VERSION = 3
+   public static let ARCHITECTURE_VERSION = 3
 
    // Shared trunk layers
    let dense1: Linear
@@ -53,7 +53,7 @@ class PolicyValueNetwork: Module {
 
    /// Initialize network with optional seed for deterministic weight initialization
    /// - Parameter seed: If provided, weights will be initialized deterministically
-   init (seed: UInt64? = nil) {
+   public init (seed: UInt64? = nil) {
       // Create deterministic key if seed provided
       let keys: [MLXArray]
       if let seed = seed {
@@ -98,7 +98,7 @@ class PolicyValueNetwork: Module {
    /// Forward pass through the network
    /// - Parameter x: Input tensor of shape [batchSize, 361]
    /// - Returns: Tuple of (policy_logits, value) where policy_logits is [batchSize, 48] and value is [batchSize, 1]
-   func execute (_ x: MLXArray) -> (policyLogits: MLXArray, value: MLXArray) {
+   public func execute (_ x: MLXArray) -> (policyLogits: MLXArray, value: MLXArray) {
       precondition(x.shape.count == 2, "Input must have shape [batchSize, 361]")
       precondition(x.shape[1] == PolicyValueNetwork.INPUT_DIMENSIONS, "Input must have \(PolicyValueNetwork.INPUT_DIMENSIONS) features")
 
@@ -122,7 +122,7 @@ class PolicyValueNetwork: Module {
    ///   - url: Directory URL where the model will be saved
    ///   - metadata: Model metadata for versioning
    /// - Throws: Errors from file operations or serialization
-   func save (to url: URL, metadata: ModelMetadata) throws {
+   public func save (to url: URL, metadata: ModelMetadata) throws {
       // Create directory if it doesn't exist
       try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: nil)
 
@@ -180,7 +180,7 @@ class PolicyValueNetwork: Module {
    /// - Parameter url: Directory URL where the model is stored
    /// - Returns: Tuple of (loaded network, metadata)
    /// - Throws: Errors from file operations or deserialization
-   static func load (from url: URL) throws -> (network: PolicyValueNetwork, metadata: ModelMetadata) {
+   public static func load (from url: URL) throws -> (network: PolicyValueNetwork, metadata: ModelMetadata) {
       // Load metadata
       let metadataURL = url.appendingPathComponent("metadata.json")
       let metadataData = try Data(contentsOf: metadataURL)
