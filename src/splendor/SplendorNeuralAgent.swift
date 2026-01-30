@@ -137,10 +137,9 @@ public class PolicyValueNetwork: Module {
          let shape = array.shape
          let count = shape.reduce(1, *)
 
-         // Convert MLXArray to Float array
-         let floatArray = (0..<count).map { index in
-            array.reshaped([count])[index].item(Float.self)
-         }
+         // Convert MLXArray to Float array efficiently (bulk conversion)
+         let reshaped = array.reshaped([count])
+         let floatArray = reshaped.asArray(Float.self)
 
          // Store as Data for efficient serialization
          let data = floatArray.withUnsafeBufferPointer { buffer in

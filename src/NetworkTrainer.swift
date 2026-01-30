@@ -46,50 +46,6 @@ public struct NetworkTrainer {
       }
    }
 
-   /// Load training dataset from file or directory
-   static func loadTrainingData (from path: String) throws -> TrainingDataset {
-      let url = URL(fileURLWithPath: path)
-      var fileURLs: [URL] = []
-
-      var isDirectory: ObjCBool = false
-      if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) {
-         if isDirectory.boolValue {
-            // Load all JSON files from directory
-            let files = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
-            fileURLs = files.filter { $0.pathExtension == "json" }
-         } else {
-            // Single file
-            fileURLs = [url]
-         }
-      } else {
-         throw NSError(domain: "NetworkTrainer", code: 1,
-                      userInfo: [NSLocalizedDescriptionKey: "Training data path does not exist: \(path)"])
-      }
-
-      guard !fileURLs.isEmpty else {
-         throw NSError(domain: "NetworkTrainer", code: 2,
-                      userInfo: [NSLocalizedDescriptionKey: "No JSON files found in: \(path)"])
-      }
-
-      // Load and merge all datasets
-      var allGames: [GameData] = []
-      for fileURL in fileURLs {
-         let data = try Data(contentsOf: fileURL)
-         let dataset = try JSONDecoder().decode(TrainingDataset.self, from: data)
-         allGames.append(contentsOf: dataset.games)
-      }
-
-      // Create merged dataset
-      let totalExamples = allGames.reduce(0) { $0 + $1.examples.count }
-      return TrainingDataset(
-         generatedAt: Date().iso8601,
-         modelPath: nil,
-         temperature: 0.0, // Not meaningful for merged dataset
-         totalGames: allGames.count,
-         totalExamples: totalExamples,
-         games: allGames
-      )
-   }
 
    /// Compute policy loss (cross-entropy between predicted and target distributions)
    /// Weighted by value targets: only learn from winning moves (weight=1.0), ignore losing/tied moves (weight=0.0)
@@ -188,7 +144,7 @@ public struct NetworkTrainer {
       let valueWeight = opts.get(option: "value-loss-weight", orElse: Float(1.0))
 
       print("Loading training data from: \(inputPath)")
-      let dataset = try loadTrainingData(from: inputPath)
+      let dataset = try TrainingDataset.loadTrainingData(from: inputPath)
       print("Loaded \(dataset.totalGames) games with \(dataset.totalExamples) total examples")
 
       // Flatten all examples from all games
