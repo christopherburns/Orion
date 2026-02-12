@@ -79,9 +79,59 @@ public class PolicyValueNetwork: Module {
       super.init()
    }
 
+   /// Private initializer that takes weights directly (for cloning)
+   private init (
+      dense1Weight: MLXArray, dense2Weight: MLXArray, dense3Weight: MLXArray,
+      policyHeadWeight: MLXArray,
+      valueHiddenWeight: MLXArray, valueHiddenBias: MLXArray,
+      valueOutputWeight: MLXArray, valueOutputBias: MLXArray) {
+      self.dense1 = Linear(weight: dense1Weight)
+      self.dense2 = Linear(weight: dense2Weight)
+      self.dense3 = Linear(weight: dense3Weight)
+      self.policyHead = Linear(weight: policyHeadWeight)
+      self.valueHidden = Linear(weight: valueHiddenWeight, bias: valueHiddenBias)
+      self.valueOutput = Linear(weight: valueOutputWeight, bias: valueOutputBias)
+      super.init()
+   }
+
    /// Convenience initializer for non-deterministic initialization
    override convenience init () {
       self.init(seed: nil)
+   }
+
+   /// Create a deep copy of this network
+   /// - Returns: A new PolicyValueNetwork with copied parameters
+   public func clone () -> PolicyValueNetwork {
+      // Get all parameters from this network
+      let params = self.parameters()
+      let flattened = params.flattened()
+
+      // Build dictionary from flattened parameters
+      var paramDict: [String: MLXArray] = [:]
+      for (key, array) in flattened {
+         paramDict[key] = array
+      }
+
+      // Extract weights for each layer (MLXArray operations create new arrays, so this is a copy)
+      let dense1Weight = paramDict["dense1.weight"]!
+      let dense2Weight = paramDict["dense2.weight"]!
+      let dense3Weight = paramDict["dense3.weight"]!
+      let policyHeadWeight = paramDict["policyHead.weight"]!
+      let valueHiddenWeight = paramDict["valueHidden.weight"]!
+      let valueHiddenBias = paramDict["valueHidden.bias"]!
+      let valueOutputWeight = paramDict["valueOutput.weight"]!
+      let valueOutputBias = paramDict["valueOutput.bias"]!
+
+      // Create new network with copied weights
+      return PolicyValueNetwork(
+         dense1Weight: dense1Weight,
+         dense2Weight: dense2Weight,
+         dense3Weight: dense3Weight,
+         policyHeadWeight: policyHeadWeight,
+         valueHiddenWeight: valueHiddenWeight,
+         valueHiddenBias: valueHiddenBias,
+         valueOutputWeight: valueOutputWeight,
+         valueOutputBias: valueOutputBias)
    }
 
    /// Initialize a linear layer with He initialization

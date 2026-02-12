@@ -108,11 +108,10 @@ public struct GameplayTester {
       ]
 
       // Game loop
-      var turnCount = 0
       let maxTurns = 1000 // Prevent infinite loops with untrained networks
 
       while case .inProgress = g.terminalCondition {
-         if turnCount >= maxTurns {
+         if g.currentTurn >= maxTurns {
             print("Warning: Game reached maximum turn limit (\(maxTurns))")
             break
          }
@@ -121,26 +120,7 @@ public struct GameplayTester {
          let currentAgent = agents[g.currentPlayer]
          let (policyLogits, _) = currentAgent.predict(game: g, currentPlayerIndex: g.currentPlayer)
 
-         // if !silence {
-         //    if let probabilities = computeMoveProbabilities(logits: policyLogits, validMoveMask: validMoveMask) {
-         //       GamePrinter.presentMoveProbabilities(probabilities, game: g, topN: 10)
-         //    }
-         // }
-
-         // guard let moveIndex = self.sampleMove(validMoveMask: validMoveMask, movePreferences: policyLogits) else {
-         //    print("Error: No valid moves available for player \(g.currentPlayer)")
-         //    print("Valid move mask: \(validMoveMask)")
-         //    print("All false? \(validMoveMask.allSatisfy { !$0 })")
-         //    print("   Game phase: \(g.phase)")
-         //    print("   Game state:")
-         //    print("      Players:")
-         //    GamePrinter.present(g)
-         //    GamePrinter.presentPlayer(g.players[g.currentPlayer], playerIndex: g.currentPlayer)
-         //    preconditionFailure("No valid moves available for player \(g.currentPlayer)")
-         //    break
-         // }
-
-         guard let (moveIndex, probabilities) = sampleMoveWithTemperature(logits: policyLogits, validMoveMask: validMoveMask, temperature: 1.0, rng: &rng) else {
+         guard let (moveIndex, _) = sampleMoveWithTemperature(logits: policyLogits, validMoveMask: validMoveMask, temperature: 1.0, rng: &rng) else {
             print("Error: No valid moves available for player \(g.currentPlayer)")
             print("Valid move mask: \(validMoveMask)")
             print("All false? \(validMoveMask.allSatisfy { !$0 })")
@@ -170,7 +150,6 @@ public struct GameplayTester {
          }
 
          g.applyMove(canonicalMoveIndex: moveIndex)
-         turnCount += 1
 
          if !silence {
             GamePrinter.presentMove(moveIndex: moveIndex, game: g)
@@ -182,12 +161,12 @@ public struct GameplayTester {
       if !silence {
          print("\n\u{001B}[1mMove Statistics:\u{001B}[0m")
          for (moveType, count) in moveTypeCounts.sorted(by: { $0.key < $1.key }) {
-            let percentage = Float(count) / Float(turnCount) * 100.0
+            let percentage = Float(count) / Float(g.currentTurn) * 100.0
             print("  \(moveType): \(count) (\(String(format: "%.1f", percentage))%)")
          }
       }
 
-      return (g.terminalCondition, turnCount)
+      return (g.terminalCondition, g.currentTurn)
    }
 
 
@@ -247,6 +226,7 @@ public struct GameplayTester {
       }
 
       print("Total turns: \(totalTurnCount)")
+      print("Average turns/game: \(Float(totalTurnCount)/Float(gameCount))")
       print("Player win counts: \(playerWinCounts)")
       print("Tied count: \(tiedCount)")
 

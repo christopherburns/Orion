@@ -385,8 +385,6 @@ public struct Game: GameProtocol {
       precondition(canonicalMoveIndex >= 0, "Canonical move index is negative")
       precondition(self.legalMoveMask(forPlayer: currentPlayer)[canonicalMoveIndex], "Move is not legal")
 
-      currentTurn += 1
-
       let playerIndex = currentPlayer
       guard playerIndex < players.count else {
          preconditionFailure("Invalid player index")
@@ -475,6 +473,7 @@ public struct Game: GameProtocol {
             // Player is within limit - advance to next player
             currentPlayer = (currentPlayer + 1) % players.count
             phase = .normalAction
+            currentTurn += 1  // Increment turn only when advancing to next player
          }
       } else if phase == .discarding {
          // After discarding, check if player is now at or below limit
@@ -482,6 +481,7 @@ public struct Game: GameProtocol {
             // Player is done discarding - advance to next player, return to normal phase
             currentPlayer = (currentPlayer + 1) % players.count
             phase = .normalAction
+            currentTurn += 1  // Increment turn only when advancing to next player
          }
          // Otherwise stay in discarding phase with same player
       }

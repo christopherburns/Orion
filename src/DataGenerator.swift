@@ -250,40 +250,27 @@ public struct DataGenerator {
          moves: moves)
    }
 
-   public static func main () throws {
-      let opts = OptionParser(help: "Generate training data via self-play games")
-      self.registerOptions(opts: opts)
-      opts.parse(tokens: CommandLine.arguments, failOnUnknownOption: true, ignoreHelp: false)
-
-      // Parse options
-      let gameCount = opts.get(option: "game-count", orElse: 1)
-      let playerCount = opts.get(option: "player-count", orElse: 2)
-      let temperature = opts.get(option: "temperature", orElse: 1.0)
-      let maxTurns = opts.get(option: "max-turns", orElse: 1000)
-      let baseSeed = opts.get(option: "seed", orElse: UInt64.random(in: 0...UInt64.max))
-
-      // Generate default output path with timestamp (base filename without extension)
-      let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-      let defaultOutputBase = "trainingdata/data_\(timestamp)"
-      let outputBase = opts.get(option: "output", orElse: defaultOutputBase)
-
-      // Strip any existing extension (save() will add the appropriate extension)
-      let outputURL = URL(fileURLWithPath: outputBase)
-      let outputPath = outputURL.deletingPathExtension().path
+   /// Generate training data programmatically (without parsing command-line args)
+   public static func generateTrainingData (
+      gameCount: Int,
+      playerCount: Int,
+      agentSpec: String,
+      temperature: Float,
+      seed: UInt64,
+      maxTurns: Int,
+      outputPath: String) throws {
 
       print("Generating training data:")
       print("  Games: \(gameCount)")
       print("  Players per game: \(playerCount)")
       print("  Temperature: \(temperature)")
       print("  Max turns: \(maxTurns)")
-      print("  Base seed: \(baseSeed)")
+      print("  Base seed: \(seed)")
       print("  Output: \(outputPath)")
 
-      // Initialize agent for self-play using shared function
-      // Pass the model path or "uninitialized" as a single-element array
-      let agentSpec = opts.get(option: "model", orElse: "random")
-      let agents = initializeAgents(playerCount: 1, agentSpecs: [agentSpec], seed: baseSeed)
-      let agent = agents[0]  // Extract the single agent for self-play
+      // Initialize agent for self-play
+      let agents = initializeAgents(playerCount: 1, agentSpecs: [agentSpec], seed: seed)
+      let agent = agents[0]
 
       // Generate games and collect training data
       var allGameData: [GameData] = []
@@ -291,7 +278,7 @@ public struct DataGenerator {
       var statistics = MoveStatistics()
 
       for gameIndex in 0..<gameCount {
-         let gameSeed = baseSeed + UInt64(gameIndex)
+         let gameSeed = seed + UInt64(gameIndex)
          print("Generating game \(gameIndex + 1)/\(gameCount) (seed: \(gameSeed))...")
 
          if let gameData = playGameAndCollectData(
@@ -308,7 +295,6 @@ public struct DataGenerator {
 
             // Collect statistics from this game
             for (playerIndex, moveIndex) in gameData.moves {
-               // Validate move index before categorizing
                guard moveIndex >= 0 && moveIndex < 48 else {
                   print("ERROR: Invalid move index \(moveIndex) from player \(playerIndex) in game \(gameIndex)")
                   continue
@@ -348,5 +334,38 @@ public struct DataGenerator {
       print("\nComputing move statistics...")
       statistics.printSummary()
       print("\nDone!")
+   }
+
+   public static func main () throws {
+      let opts = OptionParser(help: "Generate training data via self-play games")
+      self.registerOptions(opts: opts)
+      opts.parse(tokens: CommandLine.arguments, failOnUnknownOption: true, ignoreHelp: false)
+
+      // Parse options
+      let gameCount = opts.get(option: "game-count", orElse: 1)
+      let playerCount = opts.get(option: "player-count", orElse: 2)
+      let temperature = opts.get(option: "temperature", orElse: 1.0)
+      let maxTurns = opts.get(option: "max-turns", orElse: 1000)
+      let baseSeed = opts.get(option: "seed", orElse: UInt64.random(in: 0...UInt64.max))
+
+      // Generate default output path with timestamp
+      let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+      let defaultOutputBase = "trainingdata/data_\(timestamp)"
+      let outputBase = opts.get(option: "output", orElse: defaultOutputBase)
+
+      // Strip any existing extension
+      let outputURL = URL(fileURLWithPath: outputBase)
+      let outputPath = outputURL.deletingPathExtension().path
+
+      let agentSpec = opts.get(option: "agent", orElse: "random")
+      try generateTrainingData(
+         gameCount: gameCount,
+         playerCount: playerCount,
+         agentSpec: agentSpec,
+         temperature: temperature,
+         seed: baseSeed,
+         maxTurns: maxTurns,
+         outputPath: outputPath
+      )
    }
 }

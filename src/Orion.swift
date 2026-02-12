@@ -33,6 +33,7 @@ struct Orion {
          print("  train - Train a neural network model")
          print("  play - Play games using a neural network model")
          print("  generate - Generate training data for a neural network model")
+         //print("  selfplay - Self-play training loop (generate -> train -> repeat)")
          return
       }
 
@@ -45,6 +46,9 @@ struct Orion {
       else if CommandLine.arguments[1] == "generate" {
          try DataGenerator.main()
       }
+      /*else if CommandLine.arguments[1] == "selfplay" {
+         try SelfPlayTrainer.main()
+      }*/
       else {
          print("Unknown command: \(CommandLine.arguments[1])")
       }
