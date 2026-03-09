@@ -44,6 +44,11 @@ public class PolicyValueNetwork: Module {
    let dense2: Linear
    let dense3: Linear
 
+   // Dropout for regularization
+   let dropout1: Dropout
+   let dropout2: Dropout
+   let dropout3: Dropout
+
    // Policy head (outputs move logits)
    let policyHead: Linear
 
@@ -69,6 +74,11 @@ public class PolicyValueNetwork: Module {
       self.dense2 = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 512, outputDimensions: 512, key: seed == nil ? nil : keys[1]))
       self.dense3 = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 512, outputDimensions: 256, key: seed == nil ? nil : keys[2]))
 
+      // Dropout layers
+      self.dropout1 = Dropout(p: 0.3)
+      self.dropout2 = Dropout(p: 0.3)
+      self.dropout3 = Dropout(p: 0.3)
+
       // Policy head: 256 -> 48 logits
       self.policyHead = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 256, outputDimensions: PolicyValueNetwork.POLICY_DIMENSIONS, key: seed == nil ? nil : keys[3]))
 
@@ -88,6 +98,9 @@ public class PolicyValueNetwork: Module {
       self.dense1 = Linear(weight: dense1Weight)
       self.dense2 = Linear(weight: dense2Weight)
       self.dense3 = Linear(weight: dense3Weight)
+      self.dropout1 = Dropout(p: 0.3)
+      self.dropout2 = Dropout(p: 0.3)
+      self.dropout3 = Dropout(p: 0.3)
       self.policyHead = Linear(weight: policyHeadWeight)
       self.valueHidden = Linear(weight: valueHiddenWeight, bias: valueHiddenBias)
       self.valueOutput = Linear(weight: valueOutputWeight, bias: valueOutputBias)
@@ -152,10 +165,10 @@ public class PolicyValueNetwork: Module {
       precondition(x.shape.count == 2, "Input must have shape [batchSize, 361]")
       precondition(x.shape[1] == PolicyValueNetwork.INPUT_DIMENSIONS, "Input must have \(PolicyValueNetwork.INPUT_DIMENSIONS) features")
 
-      // Shared trunk with ReLU activations
-      var h = relu(dense1(x))
-      h = relu(dense2(h))
-      h = relu(dense3(h))
+      // Shared trunk with ReLU activations and dropout
+      var h = dropout1(relu(dense1(x)))
+      h = dropout2(relu(dense2(h)))
+      h = dropout3(relu(dense3(h)))
 
       // Policy head (raw logits, no activation)
       let policyLogits = policyHead(h)
@@ -279,19 +292,26 @@ public class PolicyValueNetwork: Module {
          return MLXArray(floatArray).reshaped(shape)
       }
 
-      // Create network with loaded weights
-      let network = PolicyValueNetwork()
+      // Load all weights from the dictionary
+      let dense1Weight = try loadArray(key: "dense1.weight")
+      let dense2Weight = try loadArray(key: "dense2.weight")
+      let dense3Weight = try loadArray(key: "dense3.weight")
+      let policyHeadWeight = try loadArray(key: "policyHead.weight")
+      let valueHiddenWeight = try loadArray(key: "valueHidden.weight")
+      let valueHiddenBias = try loadArray(key: "valueHidden.bias")
+      let valueOutputWeight = try loadArray(key: "valueOutput.weight")
+      let valueOutputBias = try loadArray(key: "valueOutput.bias")
 
-      // Load and assign weights (this won't work if weights are 'let', so we document the limitation)
-      // For a working solution, you'd need to modify the init() to accept optional weights
-      // or use MLX's updateParameters() if available
-
-      // Temporary: Create new layers with loaded weights
-      // This requires making the layers mutable or using a different initialization pattern
-      // For now, we'll return the network and note that manual weight assignment is needed
-
-      // TODO: Implement proper weight loading once MLX Swift's parameter update API is clarified
-      // For now, this factory method loads metadata and validates architecture version
+      // Create network with loaded weights using the private initializer
+      let network = PolicyValueNetwork(
+         dense1Weight: dense1Weight,
+         dense2Weight: dense2Weight,
+         dense3Weight: dense3Weight,
+         policyHeadWeight: policyHeadWeight,
+         valueHiddenWeight: valueHiddenWeight,
+         valueHiddenBias: valueHiddenBias,
+         valueOutputWeight: valueOutputWeight,
+         valueOutputBias: valueOutputBias)
 
       return (network, metadata)
    }

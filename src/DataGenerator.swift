@@ -185,7 +185,7 @@ public struct DataGenerator {
          let (policyLogits, _) = agent.predict(game: game, currentPlayerIndex: currentPlayer)
 
          // Sample move with temperature
-         guard let (moveIndex, probabilities) = sampleMoveWithTemperature(
+         guard let (moveIndex, _) = sampleMoveWithTemperature(
             logits: policyLogits,
             validMoveMask: validMoveMask,
             temperature: temperature,
@@ -196,12 +196,16 @@ public struct DataGenerator {
          }
 
          // Collect training example (value will be assigned after game ends)
+         // Use one-hot policy target: 1.0 for selected move, 0.0 for all others
+         var oneHotPolicy = Array(repeating: Float(0.0), count: Splendor.Game.CANONICAL_MOVE_COUNT)
+         oneHotPolicy[moveIndex] = 1.0
+
          let stateEncoding = game.encoding().map { Float($0) }
          let example = TrainingExample(
             turnNumber: turnCount,
             playerIndex: currentPlayer,
             state: stateEncoding,
-            policy: probabilities,
+            policy: oneHotPolicy,
             value: 0.0  // Placeholder, will be updated after game ends
          )
          examples.append(example)

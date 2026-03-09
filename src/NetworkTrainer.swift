@@ -24,6 +24,7 @@ public struct NetworkTrainer {
       opts.addOption("Network Trainer", "ploss", "policy-loss-weight", "Weight for policy loss (default: 1.0)")
       opts.addOption("Network Trainer", "vloss", "value-loss-weight", "Weight for value loss (default: 1.0)")
       opts.addOption("Network Trainer", "", "early-stopping", "Stop training if validation loss doesn't improve for N epochs (default: 0 = disabled)")
+      opts.addOption("Network Trainer", "wd", "weight-decay", "Weight decay (L2 regularization) strength (default: 0.0)")
    }
 
    /// Load or create a PolicyValueNetwork with metadata
@@ -155,10 +156,15 @@ public struct NetworkTrainer {
    }
 
    /// Create optimizer based on name
-   static func createOptimizer (name: String, learningRate: Float) -> Optimizer {
+   static func createOptimizer (name: String, learningRate: Float, weightDecay: Float) -> Optimizer {
       switch name.lowercased() {
-      case "adam": return Adam(learningRate: learningRate)
-      case "sgd":  return SGD(learningRate: learningRate)
+      case "adam":
+         if weightDecay > 0 {
+            return AdamW(learningRate: learningRate, weightDecay: weightDecay)
+         }
+         return Adam(learningRate: learningRate)
+      case "adamw": return AdamW(learningRate: learningRate, weightDecay: weightDecay)
+      case "sgd":  return SGD(learningRate: learningRate, weightDecay: weightDecay)
       default:
          print("Warning: Unknown optimizer '\(name)', defaulting to Adam")
          return Adam(learningRate: learningRate)
@@ -178,6 +184,7 @@ public struct NetworkTrainer {
       optimizerName: String = "adam",
       policyWeight: Float = 1.0,
       valueWeight: Float = 1.0,
+      weightDecay: Float = 0.0,
       earlyStoppingPatience: Int = 0) throws {
 
       print("Loading training data from: \(inputPath)")
@@ -208,7 +215,7 @@ public struct NetworkTrainer {
       }
 
       let (network, metadata) = try loadOrCreateNetwork(modelPath: modelPath, seed: seed)
-      let optimizer = createOptimizer(name: optimizerName, learningRate: learningRate)
+      let optimizer = createOptimizer(name: optimizerName, learningRate: learningRate, weightDecay: weightDecay)
 
       // Training loop
       print("\nStarting training...")
@@ -227,6 +234,9 @@ public struct NetworkTrainer {
          var epochPolicyLoss: Float = 0.0
          var epochValueLoss: Float = 0.0
          var batchCount = 0
+
+         // Enable training mode (activates dropout)
+         network.train()
 
          // Process in batches
          for batchStart in stride(from: 0, to: shuffledTraining.count, by: batchSize) {
@@ -260,7 +270,8 @@ public struct NetworkTrainer {
          let avgEpochLoss = avgEpochPolicyLoss * policyWeight + avgEpochValueLoss * valueWeight
          epochLosses.append(avgEpochLoss)
 
-         // Validation
+         // Validation (disable dropout)
+         network.train(false)
          let avgValidationLosses = computeValidationLoss(
             network: network,
             validationExamples: validationExamples,
@@ -355,6 +366,7 @@ public struct NetworkTrainer {
       let policyWeight = opts.get(option: "policy-loss-weight", orElse: Float(1.0))
       let valueWeight = opts.get(option: "value-loss-weight", orElse: Float(1.0))
       let earlyStoppingPatience = opts.get(option: "early-stopping", orElse: 0)
+      let weightDecay = opts.get(option: "weight-decay", orElse: Float(0.0))
 
       try trainModel(
          inputPath: inputPath,
@@ -368,6 +380,7 @@ public struct NetworkTrainer {
          optimizerName: optimizerName,
          policyWeight: policyWeight,
          valueWeight: valueWeight,
+         weightDecay: weightDecay,
          earlyStoppingPatience: earlyStoppingPatience
       )
    }
