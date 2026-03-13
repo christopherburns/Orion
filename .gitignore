@@ -1,0 +1,29 @@
+# Build output
+.build/
+build/
+*.xcodeproj
+.swiftpm/
+
+# Xcode
+xcuserdata/
+DerivedData/
+*.xcworkspace
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+
+# macOS
+.DS_Store
+
+# Binary artifacts
+orion
+orion.debug
+*.dSYM
+
+# MLX metallib (regenerated on build)
+*.metallib
+
+# Training data and models (uncomment when you start training)
+# models/
+# training_data/
