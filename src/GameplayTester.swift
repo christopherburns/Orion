@@ -23,6 +23,7 @@ public struct GameplayTester {
             "match the number of players, or if one is supplied it will be " +
             "instanced for all players.")
 
+      opts.addOption("Gameplay Tester", "t", "temperature", "Sampling temperature for move selection (0 = greedy, default: 0)")
       opts.addOption("Gameplay Tester", "v", "verbose", "Show detailed game output even for multiple games (default: auto)")
       opts.addOption("Gameplay Tester", "", "show-probabilities", "Show move probability distribution for each turn (default: false)")
       opts.addOption("Gameplay Tester", "", "max-turns", "Maximum turns per game before timeout (default: 1000)")
@@ -82,7 +83,7 @@ public struct GameplayTester {
       }
    }
 
-   static func playGame (playerCount: Int, silence: Bool, seed: UInt64, agents: [any AgentProtocol]) -> (GameTerminalCondition, Int) {
+   static func playGame (playerCount: Int, silence: Bool, seed: UInt64, agents: [any AgentProtocol], temperature: Float = 0) -> (GameTerminalCondition, Int) {
 
       precondition(agents.count == playerCount, "Number of agents must match player count")
 
@@ -120,7 +121,7 @@ public struct GameplayTester {
          let currentAgent = agents[g.currentPlayer]
          let (policyLogits, _) = currentAgent.predict(game: g, currentPlayerIndex: g.currentPlayer)
 
-         guard let (moveIndex, _) = sampleMoveWithTemperature(logits: policyLogits, validMoveMask: validMoveMask, temperature: 1.0, rng: &rng) else {
+         guard let (moveIndex, _) = sampleMoveWithTemperature(logits: policyLogits, validMoveMask: validMoveMask, temperature: temperature, rng: &rng) else {
             print("Error: No valid moves available for player \(g.currentPlayer)")
             print("Valid move mask: \(validMoveMask)")
             print("All false? \(validMoveMask.allSatisfy { !$0 })")
@@ -187,6 +188,7 @@ public struct GameplayTester {
       let gameCount = opts.get(option: "game-count", orElse: 1)
       let seed = opts.get(option: "seed", orElse: UInt64(42))
       let agentSpecs = opts.getAll(option: "agents", as: String.self)
+      let temperature = opts.get(option: "temperature", orElse: Float(0))
 
       let silence = gameCount > 1
 
@@ -211,7 +213,7 @@ public struct GameplayTester {
       var playerWinCounts: [Int: Int] = [:]
       var tiedCount = 0
       for gameIndex in 0..<gameCount {
-         let (terminalCondition, turnCount) = self.playGame(playerCount: playerCount, silence: silence, seed: seed+UInt64(gameIndex), agents: agents)
+         let (terminalCondition, turnCount) = self.playGame(playerCount: playerCount, silence: silence, seed: seed+UInt64(gameIndex), agents: agents, temperature: temperature)
          print("Completed game \(gameIndex) in \(turnCount) turns, \(terminalCondition)")
          gameResults.append((terminalCondition, turnCount))
          totalTurnCount += turnCount
@@ -231,7 +233,7 @@ public struct GameplayTester {
       print("Tied count: \(tiedCount)")
 
       for (index, count) in playerWinCounts {
-         print("Player \(index) won \(count) games (\(Float(count) / Float(gameCount) * 100.0)%)")
+         print("Player \(index) (\(agentSpecs[index])) won \(count) games (\(Float(count) / Float(gameCount) * 100.0)%)")
       }
 
       print("Tied games: \(tiedCount)")
