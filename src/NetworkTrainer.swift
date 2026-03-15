@@ -142,7 +142,7 @@ public struct NetworkTrainer {
       }
 
       // Call the gradient function (computes loss and gradients)
-      let (lossArray, grads) = vg(network, [])
+      let (_, grads) = vg(network, [])
 
       // Update parameters
       optimizer.update(model: network, gradients: grads)

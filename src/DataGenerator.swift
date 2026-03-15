@@ -191,7 +191,7 @@ public struct DataGenerator {
          let (policyLogits, _) = agent.predict(game: game, currentPlayerIndex: currentPlayer)
 
          // Sample move with temperature
-         guard let (moveIndex, policyTarget) = sampleMoveWithTemperature(
+         guard let (moveIndex, _) = sampleMoveWithTemperature(
             logits: policyLogits,
             validMoveMask: validMoveMask,
             temperature: temperature,
@@ -201,16 +201,15 @@ public struct DataGenerator {
             return nil
          }
 
-         // Use the softmax probability distribution as the policy target rather than
-         // a one-hot encoding of the chosen move. This prevents the policy head from
-         // overfitting to a single action and gives it a smooth, generalizable signal.
+         var oneHot = Array(repeating: Float(0.0), count: Splendor.Game.CANONICAL_MOVE_COUNT)
+         oneHot[moveIndex] = 1.0
 
          let stateEncoding = game.encoding().map { Float($0) }
          let example = TrainingExample(
             turnNumber: turnCount,
             playerIndex: currentPlayer,
             state: stateEncoding,
-            policy: policyTarget,
+            policy: oneHot,
             value: 0.0  // Placeholder, will be updated after game ends
          )
          examples.append(example)
@@ -354,7 +353,7 @@ public struct DataGenerator {
       // Parse options
       let gameCount = opts.get(option: "game-count", orElse: 1)
       let playerCount = opts.get(option: "player-count", orElse: 2)
-      let temperature = opts.get(option: "temperature", orElse: 1.0)
+      let temperature = opts.get(option: "temperature", orElse: Float(1.0))
       let maxTurns = opts.get(option: "max-turns", orElse: 1000)
       let baseSeed = opts.get(option: "seed", orElse: UInt64.random(in: 0...UInt64.max))
 

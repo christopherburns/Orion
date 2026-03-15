@@ -95,7 +95,8 @@ def generateData (cfg: Config, outputPath: str, agent: str, temperature: float) 
 
 
 def generateInitialData (cfg: Config, outputPath: str) -> bool:
-   """Play the first batch of games using the random agent."""
+   """Play the first batch of games using the random agent.
+   Policy target temperature is always 0 (one-hot) since random agent logits are noise."""
    args = [
       cfg.binary, "generate",
       "-o", outputPath,
@@ -165,16 +166,21 @@ def computeTemperature (cfg: Config, cycle: int) -> float:
 
 # ── Path helpers ───────────────────────────────────────────────────────────────
 
+def cycleStr (cfg: Config, cycle: int) -> str:
+   """Zero-padded cycle number wide enough for cfg.maxCycles."""
+   width = len(str(cfg.maxCycles))
+   return str(cycle).zfill(width)
+
 def modelPath (cfg: Config, cycle: int) -> str:
-   return f"{cfg.modelDir}/model_c{cycle}_e{cfg.epochs}_b{cfg.batchSize}"
+   return f"{cfg.modelDir}/model_c{cycleStr(cfg, cycle)}_e{cfg.epochs}_b{cfg.batchSize}"
 
 def dataPath (cfg: Config, cycle: int) -> str:
    if cycle == 1:
       return f"{cfg.dataDir}/data_r1_{cfg.initialGames}"
-   return f"{cfg.dataDir}/data_c{cycle - 1}_{cfg.gamesPerCycle}"
+   return f"{cfg.dataDir}/data_c{cycleStr(cfg, cycle - 1)}_{cfg.gamesPerCycle}"
 
 def evalPath (cfg: Config, cycle: int, suffix: str = "") -> str:
-   return f"{cfg.evalDir}/eval_cycle{cycle}{suffix}.txt"
+   return f"{cfg.evalDir}/eval_cycle{cycleStr(cfg, cycle)}{suffix}.txt"
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
