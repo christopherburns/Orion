@@ -79,14 +79,27 @@ struct MoveStatistics {
 
    /// Print formatted statistics
    func printSummary () {
-      print("\n" + String(repeating: "=", count: 80))
-      print("MOVE STATISTICS")
-      print(String(repeating: "=", count: 80))
-
       let totalWinner = winnerMoves.values.reduce(0, +)
       let totalLoser = loserMoves.values.reduce(0, +)
       let totalTied = tiedMoves.values.reduce(0, +)
       let grandTotal = totalWinner + totalLoser + totalTied
+
+      // Derive count column width from the largest number that will appear
+      let maxCount = max(totalWinner, totalLoser, totalTied, 1)
+      let countWidth = String(maxCount).count
+
+      // Each data cell is: countWidth digits + " (XX.X%)" = countWidth + 8 chars
+      let cellWidth = countWidth + 8
+      let nameWidth = 25
+      let tableWidth = nameWidth + 1 + cellWidth + 2 + cellWidth + 2 + cellWidth
+
+      func cell (_ count: Int, _ pct: Float) -> String {
+         String(format: "%\(countWidth)d (%4.1f%%)", count, pct)
+      }
+
+      print("\n" + String(repeating: "=", count: tableWidth))
+      print("MOVE STATISTICS")
+      print(String(repeating: "=", count: tableWidth))
 
       print("\nOverall Totals:")
       print("  Winner moves: \(totalWinner)")
@@ -94,9 +107,13 @@ struct MoveStatistics {
       print("  Tied moves:   \(totalTied)")
       print("  Grand total:  \(grandTotal)")
 
-      print("\n" + String(repeating: "-", count: 80))
-      print("Move Type                 Winners        Losers         Tied")
-      print(String(repeating: "-", count: 80))
+      let header = "Move Type".padding(toLength: nameWidth, withPad: " ", startingAt: 0)
+         + " " + "Winners".padding(toLength: cellWidth, withPad: " ", startingAt: 0)
+         + "  " + "Losers".padding(toLength: cellWidth, withPad: " ", startingAt: 0)
+         + "  Tied"
+      print("\n" + String(repeating: "-", count: tableWidth))
+      print(header)
+      print(String(repeating: "-", count: tableWidth))
 
       for category in MoveCategory.allCases {
          let winnerCount = winnerMoves[category]!
@@ -107,21 +124,10 @@ struct MoveStatistics {
          let loserPct = totalLoser > 0 ? Float(loserCount) / Float(totalLoser) * 100.0 : 0.0
          let tiedPct = totalTied > 0 ? Float(tiedCount) / Float(totalTied) * 100.0 : 0.0
 
-         // Completely avoid String(format:...) - just use string interpolation
-         let name = category.rawValue.padding(toLength: 25, withPad: " ", startingAt: 0)
-
-         let winnerPctRounded = Int(winnerPct * 10) // For one decimal place
-         let winnerLine = "\(winnerCount) (\(winnerPctRounded / 10).\(winnerPctRounded % 10)%)"
-
-         let loserPctRounded = Int(loserPct * 10)
-         let loserLine = "\(loserCount) (\(loserPctRounded / 10).\(loserPctRounded % 10)%)"
-
-         let tiedPctRounded = Int(tiedPct * 10)
-         let tiedLine = "\(tiedCount) (\(tiedPctRounded / 10).\(tiedPctRounded % 10)%)"
-
-         print("\(name) \(winnerLine.padding(toLength: 13, withPad: " ", startingAt: 0)) \(loserLine.padding(toLength: 13, withPad: " ", startingAt: 0)) \(tiedLine)")
+         let name = category.rawValue.padding(toLength: nameWidth, withPad: " ", startingAt: 0)
+         print("\(name) \(cell(winnerCount, winnerPct))  \(cell(loserCount, loserPct))  \(cell(tiedCount, tiedPct))")
       }
-      print(String(repeating: "=", count: 80))
+      print(String(repeating: "=", count: tableWidth))
    }
 }
 
@@ -185,7 +191,7 @@ public struct DataGenerator {
          let (policyLogits, _) = agent.predict(game: game, currentPlayerIndex: currentPlayer)
 
          // Sample move with temperature
-         guard let (moveIndex, _) = sampleMoveWithTemperature(
+         guard let (moveIndex, policyTarget) = sampleMoveWithTemperature(
             logits: policyLogits,
             validMoveMask: validMoveMask,
             temperature: temperature,
@@ -195,17 +201,16 @@ public struct DataGenerator {
             return nil
          }
 
-         // Collect training example (value will be assigned after game ends)
-         // Use one-hot policy target: 1.0 for selected move, 0.0 for all others
-         var oneHotPolicy = Array(repeating: Float(0.0), count: Splendor.Game.CANONICAL_MOVE_COUNT)
-         oneHotPolicy[moveIndex] = 1.0
+         // Use the softmax probability distribution as the policy target rather than
+         // a one-hot encoding of the chosen move. This prevents the policy head from
+         // overfitting to a single action and gives it a smooth, generalizable signal.
 
          let stateEncoding = game.encoding().map { Float($0) }
          let example = TrainingExample(
             turnNumber: turnCount,
             playerIndex: currentPlayer,
             state: stateEncoding,
-            policy: oneHotPolicy,
+            policy: policyTarget,
             value: 0.0  // Placeholder, will be updated after game ends
          )
          examples.append(example)
@@ -283,7 +288,9 @@ public struct DataGenerator {
 
       for gameIndex in 0..<gameCount {
          let gameSeed = seed + UInt64(gameIndex)
-         print("Generating game \(gameIndex + 1)/\(gameCount) (seed: \(gameSeed))...")
+         if gameIndex % 100 == 0 {
+            print("Generating game \(gameIndex + 1)/\(gameCount) (seed: \(gameSeed))...")
+         } 
 
          if let gameData = playGameAndCollectData(
             playerCount: playerCount,
@@ -295,7 +302,6 @@ public struct DataGenerator {
 
             allGameData.append(gameData)
             successfulGames += 1
-            print("  Completed: \(gameData.turnCount) turns, \(gameData.examples.count) examples, winner: \(gameData.winner?.description ?? "tied")")
 
             // Collect statistics from this game
             for (playerIndex, moveIndex) in gameData.moves {

@@ -121,7 +121,10 @@ public struct GameplayTester {
          let currentAgent = agents[g.currentPlayer]
          let (policyLogits, _) = currentAgent.predict(game: g, currentPlayerIndex: g.currentPlayer)
 
-         guard let (moveIndex, _) = sampleMoveWithTemperature(logits: policyLogits, validMoveMask: validMoveMask, temperature: temperature, rng: &rng) else {
+         let moveResult = temperature > 0
+            ? sampleMoveWithTemperature(logits: policyLogits, validMoveMask: validMoveMask, temperature: temperature, rng: &rng)
+            : sampleMove(validMoveMask: validMoveMask, movePreferences: policyLogits).map { ($0, [Float]()) }
+         guard let (moveIndex, _) = moveResult else {
             print("Error: No valid moves available for player \(g.currentPlayer)")
             print("Valid move mask: \(validMoveMask)")
             print("All false? \(validMoveMask.allSatisfy { !$0 })")
@@ -233,7 +236,8 @@ public struct GameplayTester {
       print("Tied count: \(tiedCount)")
 
       for (index, count) in playerWinCounts {
-         print("Player \(index) (\(agentSpecs[index])) won \(count) games (\(Float(count) / Float(gameCount) * 100.0)%)")
+         let spec = index < agentSpecs.count ? agentSpecs[index] : "random"
+         print("Player \(index) (\(spec)) won \(count) games (\(Float(count) / Float(gameCount) * 100.0)%)")
       }
 
       print("Tied games: \(tiedCount)")
