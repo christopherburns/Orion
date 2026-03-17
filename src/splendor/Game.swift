@@ -343,16 +343,25 @@ public struct Game: GameProtocol {
    }
 
    private mutating func payForCard (card: Card, playerIndex: Int) {
-      // Pay for the card using gems and permanent gems from owned cards
+      // Pay for the card using permanent gem discounts from owned cards, then
+      // regular gems, then gold gems (wildcards) to cover any remaining shortfall.
+      var goldUsed = 0
       for (gemIndex, price) in card.price.enumerated() {
          if price > 0 {
             let gemType = GemType(rawValue: gemIndex)!
             let permanentGems = players[playerIndex].cards.filter { $0.color == gemType }.count
-            let gemsToPay = max(0, price - permanentGems)
-            players[playerIndex].gems[gemIndex] -= gemsToPay
-            supply[gemType, default: 0] += gemsToPay
+            let needed = max(0, price - permanentGems)
+            let regularPaid = min(needed, players[playerIndex].gems[gemIndex])
+            let goldNeeded = needed - regularPaid
+
+            players[playerIndex].gems[gemIndex] -= regularPaid
+            supply[gemType, default: 0] += regularPaid
+            goldUsed += goldNeeded
          }
       }
+      // Deduct gold gems used as wildcards and return them to supply
+      players[playerIndex].goldGems -= goldUsed
+      goldGemSupply += goldUsed
    }
 
    private mutating func awardAvailableNobles (toPlayer playerIndex: Int) {
