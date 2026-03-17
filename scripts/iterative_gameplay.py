@@ -11,10 +11,12 @@ Options:
    --batch-size N          Training batch size                                     [default: 128]
    --cycles N              Total number of cycles to run                           [default: 10]
    --eval-games N          Games to play when evaluating                           [default: 500]
+   --champion-threshold N  Min win rate vs previous to accept new model (0=off)   [default: 0.52]
    --early-stopping N      Stop training after N epochs w/out improvement (0=off)  [default: 10]
    --initial-temp TEMP     Sampling temperature for cycle 1                        [default: 1.5]
    --final-temp TEMP       Sampling temperature for the last cycle                 [default: 0.5]
-   --learning-rate R       Learning rate                                           [default: 0.0003]
+   --learning-rate R       Learning rate for cycle 1                               [default: 0.0003]
+   --lr-decay R            Multiplicative LR decay per cycle (1.0 = no decay)     [default: 1.0]
    --weight-decay N        Weight decay rate                                       [default: 0.01]
    --eval-temp TEMP        Sampling temperature during evaluation (0=greedy)       [default: 0]
    --accumulate-data       Train on all previous cycles' data, not just the latest
@@ -26,6 +28,7 @@ Options:
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -55,11 +58,13 @@ class Config:
    epochs:          int   = 100
    batchSize:       int   = 128
    maxCycles:       int   = 10
-   evalGames:       int   = 50
-   earlyStopping:   int   = 10   # epochs without improvement before stopping (0 = disabled)
+   evalGames:        int   = 50
+   championThreshold: float = 0.52  # min win rate vs previous to accept new model (0 = disabled)
+   earlyStopping:    int   = 10   # epochs without improvement before stopping (0 = disabled)
    initialTemp:     float = 1.5
    finalTemp:       float = 0.5
    learningRate:    float = 0.0003
+   lrDecay:         float = 1.0
    weightDecay:     float = 0.01
    evalTemp:        float = 0
    accumulateData:  bool  = False
@@ -87,7 +92,7 @@ def generateData (cfg: Config, outputPath: str, agent: str, temperature: float) 
    args = [
       cfg.binary, "generate",
       "-o", outputPath,
-      "-g", str(cfg.gamesPerCycle),
+      "-n", str(cfg.gamesPerCycle),
       "-a", agent,
       "-t", f"{temperature:.2f}",
    ]
@@ -100,14 +105,14 @@ def generateInitialData (cfg: Config, outputPath: str) -> bool:
    args = [
       cfg.binary, "generate",
       "-o", outputPath,
-      "-g", str(cfg.initialGames),
+      "-n", str(cfg.initialGames),
       "-a", "random",
       "-t", f"{cfg.initialTemp:.2f}",
    ]
    return run(args, "generate-initial") == 0
 
 
-def trainModel (cfg: Config, inputPath: str, outputPath: str, prevModelPath: str | None = None) -> bool:
+def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: float, prevModelPath: str | None = None) -> bool:
    """Train (or fine-tune) a model on inputPath, saving weights to outputPath."""
    args = [
       cfg.binary, "train",
@@ -115,13 +120,18 @@ def trainModel (cfg: Config, inputPath: str, outputPath: str, prevModelPath: str
       "-e", str(cfg.epochs),
       "-b", str(cfg.batchSize),
       "-o", outputPath,
-      "--learning-rate", str(cfg.learningRate),
+      "--learning-rate", str(learningRate),
       "--weight-decay", str(cfg.weightDecay),
       "--early-stopping", str(cfg.earlyStopping),
    ]
    if prevModelPath is not None:
       args += ["-m", prevModelPath]
    return run(args, "train") == 0
+
+
+def cycleLearningRate (cfg: Config, cycle: int) -> float:
+   """Geometric decay: LR halves (or scales by lrDecay) each cycle."""
+   return cfg.learningRate * (cfg.lrDecay ** (cycle - 1))
 
 
 def evaluateVsRandom (cfg: Config, modelPath: str, outputFile: str) -> bool:
@@ -152,6 +162,22 @@ def evaluateVsPrevious (cfg: Config, modelPath: str, prevModelPath: str, outputF
       result = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT)
    print(f"Evaluation results saved to {outputFile}")
    return result.returncode == 0
+
+
+# ── Evaluation parsing ─────────────────────────────────────────────────────────
+
+def parseWinRate (evalFile: str, playerIndex: int = 0) -> float | None:
+   """Parse win rate for a player from an orion play output file. Returns None if parsing fails."""
+   try:
+      with open(evalFile) as f:
+         for line in f:
+            if f"Player {playerIndex}" in line and "won" in line:
+               match = re.search(r'\((\d+\.?\d*)%\)', line)
+               if match:
+                  return float(match.group(1)) / 100.0
+   except (FileNotFoundError, ValueError):
+      pass
+   return None
 
 
 # ── Temperature schedule ───────────────────────────────────────────────────────
@@ -194,8 +220,9 @@ def runFirstCycle (cfg: Config) -> str:
 
    print(f"\n=== Cycle 1: Training model ===")
    model = modelPath(cfg, 1)
+   lr = cycleLearningRate(cfg, 1)
    trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.gz"
-   if not trainModel(cfg, trainingInput, model):
+   if not trainModel(cfg, trainingInput, model, learningRate=lr):
       sys.exit(1)
 
    print(f"\n=== Cycle 1: Evaluating model vs random ===")
@@ -215,17 +242,30 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> str:
       sys.exit(1)
 
    currentModel = modelPath(cfg, cycle)
-   print("Training model (continuing from previous cycle)...")
+   lr = cycleLearningRate(cfg, cycle)
+   print(f"Training model (continuing from previous cycle, LR={lr:.6f})...")
    trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.gz"
-   if not trainModel(cfg, trainingInput, currentModel, prevModelPath=f"{prevModel}/"):
+   if not trainModel(cfg, trainingInput, currentModel, learningRate=lr, prevModelPath=f"{prevModel}/"):
       sys.exit(1)
 
    print("Evaluating model vs random...")
    evaluateVsRandom(cfg, f"{currentModel}/", evalPath(cfg, cycle))
 
+   vsPrevFile = evalPath(cfg, cycle, "_vs_prev")
    if os.path.isdir(f"{prevModel}/") or os.path.isdir(prevModel):
       print("Evaluating model vs previous cycle...")
-      evaluateVsPrevious(cfg, f"{currentModel}/", f"{prevModel}/", evalPath(cfg, cycle, "_vs_prev"))
+      evaluateVsPrevious(cfg, f"{currentModel}/", f"{prevModel}/", vsPrevFile)
+
+   # Champion gating: only accept the new model if it clears the win-rate threshold
+   if cfg.championThreshold > 0:
+      winRate = parseWinRate(vsPrevFile)
+      if winRate is None:
+         print("Warning: could not parse vs-prev win rate, accepting new model by default")
+      elif winRate < cfg.championThreshold:
+         print(f"New model win rate {winRate:.1%} < threshold {cfg.championThreshold:.1%} — keeping previous champion")
+         return prevModel
+      else:
+         print(f"New model win rate {winRate:.1%} >= threshold {cfg.championThreshold:.1%} — accepting new champion")
 
    return currentModel
 
@@ -237,11 +277,13 @@ def configFromArgs (args: dict) -> Config:
       epochs        = int(args["--epochs"]),
       batchSize     = int(args["--batch-size"]),
       maxCycles     = int(args["--cycles"]),
-      evalGames     = int(args["--eval-games"]),
-      earlyStopping = int(args["--early-stopping"]),
+      evalGames          = int(args["--eval-games"]),
+      championThreshold  = float(args["--champion-threshold"]),
+      earlyStopping      = int(args["--early-stopping"]),
       initialTemp   = float(args["--initial-temp"]),
       finalTemp     = float(args["--final-temp"]),
       learningRate  = float(args["--learning-rate"]),
+      lrDecay       = float(args["--lr-decay"]),
       weightDecay   = float(args["--weight-decay"]),
       evalTemp      = float(args["--eval-temp"]),
       accumulateData = bool(args["--accumulate-data"]),

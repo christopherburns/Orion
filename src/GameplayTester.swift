@@ -11,7 +11,7 @@ public struct GameplayTester {
       opts.addOption("Gameplay Tester", "n", "game-count", "Number of games to play (default: 1)")
       opts.addOption("Gameplay Tester", "p", "player-count", "Number of players [2-4] (default: 2)")
 
-      opts.addOption("Gameplay Tester", "a", "agents", "Path to model file, or name of non-model-based agent (optional, default is 'random')",
+      opts.addOption("Gameplay Tester", "a", "agent", "Path to model file, or name of non-model-based agent (optional, default is 'random')",
          longDoc:
             "Specifies which agent(s) to use for gameplay. " +
             "If a path to a model file is provided (e.g., 'models/best.mlx'), " +
@@ -83,7 +83,7 @@ public struct GameplayTester {
       }
    }
 
-   static func playGame (playerCount: Int, silence: Bool, seed: UInt64, agents: [any AgentProtocol], temperature: Float = 0) -> (GameTerminalCondition, Int) {
+   static func playGame (playerCount: Int, silence: Bool, seed: UInt64, agents: [any AgentProtocol], temperature: Float = 0, maxTurns: Int = 1000) -> (GameTerminalCondition, Int) {
 
       precondition(agents.count == playerCount, "Number of agents must match player count")
 
@@ -109,11 +109,10 @@ public struct GameplayTester {
       ]
 
       // Game loop
-      let maxTurns = 1000 // Prevent infinite loops with untrained networks
-
+      var timedOut = false
       while case .inProgress = g.terminalCondition {
          if g.currentTurn >= maxTurns {
-            print("Warning: Game reached maximum turn limit (\(maxTurns))")
+            timedOut = true
             break
          }
 
@@ -170,54 +169,49 @@ public struct GameplayTester {
          }
       }
 
-      return (g.terminalCondition, g.currentTurn)
+      return (timedOut ? .timedOut : g.terminalCondition, g.currentTurn)
    }
 
 
    public static func main () throws {
-      print("Hello Orion!")
-
-      ////////////////////////////////////////
-      // Set up Command Line Option Parsing //
-      ////////////////////////////////////////
-
       let opts = OptionParser(help: "Play Splendor games using neural network or random agents")
       self.registerOptions(opts: opts)
-      // parse the command line arguments, now that all options are registered
       opts.parse(tokens: CommandLine.arguments, failOnUnknownOption: true, ignoreHelp: false)
-
 
       let playerCount = opts.get(option: "player-count", orElse: 2)
       let gameCount = opts.get(option: "game-count", orElse: 1)
       let seed = opts.get(option: "seed", orElse: UInt64(42))
-      let agentSpecs = opts.getAll(option: "agents", as: String.self)
+      let agentSpecs = opts.getAll(option: "agent", as: String.self)
       let temperature = opts.get(option: "temperature", orElse: Float(0))
+      let maxTurns = opts.get(option: "max-turns", orElse: 1000)
+
+      // Print configuration
+      let agentDesc = agentSpecs.isEmpty ? "random" : agentSpecs.joined(separator: ", ")
+      print("Configuration:")
+      print("  Games:            \(gameCount)")
+      print("  Players per game: \(playerCount)")
+      print("  Agent:            \(agentDesc)")
+      print("  Temperature:      \(String(format: "%.2f", temperature))")
+      print("  Max turns:        \(maxTurns)")
+      print("  Seed:             \(seed)")
 
       let silence = gameCount > 1
 
       // Initialize agents based on command-line specifications
       let agents = initializeAgents(playerCount: playerCount, agentSpecs: agentSpecs, seed: seed)
 
-      // Print summary of agent types
-      print("Playing \(gameCount) games with \(playerCount) players")
-      if agentSpecs.isEmpty || agentSpecs.count == 1 {
-         // All players use the same agent
-         let spec = agentSpecs.isEmpty ? "random" : agentSpecs[0]
-         print("  All players: \(spec)")
-      } else {
-         // Different agents per player
-         for (index, spec) in agentSpecs.enumerated() {
-            print("  Player \(index): \(spec)")
-         }
-      }
-
       var gameResults: [(GameTerminalCondition, Int)] = []
       var totalTurnCount = 0
       var playerWinCounts: [Int: Int] = [:]
       var tiedCount = 0
+      var timedOutCount = 0
       for gameIndex in 0..<gameCount {
-         let (terminalCondition, turnCount) = self.playGame(playerCount: playerCount, silence: silence, seed: seed+UInt64(gameIndex), agents: agents, temperature: temperature)
-         print("Completed game \(gameIndex) in \(turnCount) turns, \(terminalCondition)")
+
+         if gameIndex % 100 == 0 {
+            print("Playing game \(gameIndex + 1)/\(gameCount) (seed: \(seed+UInt64(gameIndex)))...")
+         }
+         
+         let (terminalCondition, turnCount) = self.playGame(playerCount: playerCount, silence: silence, seed: seed+UInt64(gameIndex), agents: agents, temperature: temperature, maxTurns: maxTurns)
          gameResults.append((terminalCondition, turnCount))
          totalTurnCount += turnCount
          switch terminalCondition {
@@ -225,21 +219,24 @@ public struct GameplayTester {
             playerWinCounts[playerIndex, default: 0] += 1
          case .tied:
             tiedCount += 1
+         case .timedOut:
+            timedOutCount += 1
          case .inProgress:
             break
          }
       }
 
+      let concludedCount = gameCount - timedOutCount
       print("Total turns: \(totalTurnCount)")
-      print("Average turns/game: \(Float(totalTurnCount)/Float(gameCount))")
-      print("Player win counts: \(playerWinCounts)")
-      print("Tied count: \(tiedCount)")
+      print("Average turns/game: \(String(format: "%.1f", Float(totalTurnCount)/Float(gameCount)))")
 
-      for (index, count) in playerWinCounts {
+      for (index, count) in playerWinCounts.sorted(by: { $0.key < $1.key }) {
          let spec = index < agentSpecs.count ? agentSpecs[index] : "random"
-         print("Player \(index) (\(spec)) won \(count) games (\(Float(count) / Float(gameCount) * 100.0)%)")
+         print("Player \(index) (\(spec)) won \(count) games (\(String(format: "%.1f", Float(count) / Float(concludedCount) * 100.0))%)")
       }
-
       print("Tied games: \(tiedCount)")
+      if timedOutCount > 0 {
+         print("Timed out:  \(timedOutCount) games (exceeded \(maxTurns) turns)")
+      }
    }
 }

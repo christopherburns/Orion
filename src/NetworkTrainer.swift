@@ -18,13 +18,13 @@ public struct NetworkTrainer {
       opts.addOption("Network Trainer", "s", "seed", "Random seed for reproducibility (default: random)")
       opts.addOption("Network Trainer", "b", "batch-size", "Batch size for training (default: 256)")
       opts.addOption("Network Trainer", "e", "epochs", "Number of training epochs (default: 10)")
-      opts.addOption("Network Trainer", "lr", "learning-rate", "Learning rate (default: 0.001)")
-      opts.addOption("Network Trainer", "v", "validation-split", "Fraction of data to use for validation (default: 0.1)")
-      opts.addOption("Network Trainer", "opt", "optimizer", "Optimizer: adam, sgd (default: adam)")
-      opts.addOption("Network Trainer", "ploss", "policy-loss-weight", "Weight for policy loss (default: 1.0)")
-      opts.addOption("Network Trainer", "vloss", "value-loss-weight", "Weight for value loss (default: 1.0)")
-      opts.addOption("Network Trainer", "", "early-stopping", "Stop training if validation loss doesn't improve for N epochs (default: 0 = disabled)")
-      opts.addOption("Network Trainer", "wd", "weight-decay", "Weight decay (L2 regularization) strength (default: 0.0)")
+      opts.addOption("Network Trainer", "r", "learning-rate", "Learning rate (default: 0.001)")
+      opts.addOption("Network Trainer", "f", "validation-split", "Fraction of data to use for validation (default: 0.1)")
+      opts.addOption("Network Trainer", "O", "optimizer", "Optimizer: adam, sgd (default: adam)")
+      opts.addOption("Network Trainer", "P", "policy-loss-weight", "Weight for policy loss (default: 1.0)")
+      opts.addOption("Network Trainer", "V", "value-loss-weight", "Weight for value loss (default: 1.0)")
+      opts.addOption("Network Trainer", "E", "early-stopping", "Stop training if validation loss doesn't improve for N epochs (default: 0 = disabled)")
+      opts.addOption("Network Trainer", "w", "weight-decay", "Weight decay (L2 regularization) strength (default: 0.0)")
    }
 
    /// Load or create a PolicyValueNetwork with metadata
@@ -205,14 +205,8 @@ public struct NetworkTrainer {
       let validationExamples = Array(allExamples.prefix(validationCount))
       let trainingExamples = Array(allExamples.suffix(allExamples.count - validationCount))
 
-      print("Using optimizer: \(optimizerName) with learning rate: \(learningRate)")
       print("Training set: \(trainingExamples.count) examples")
       print("Validation set: \(validationExamples.count) examples")
-      if let modelPath = modelPath {
-         print("Loading model from: \(modelPath)")
-      } else {
-         print("Creating new untrained model")
-      }
 
       let (network, metadata) = try loadOrCreateNetwork(modelPath: modelPath, seed: seed)
       let optimizer = createOptimizer(name: optimizerName, learningRate: learningRate, weightDecay: weightDecay)
@@ -367,6 +361,22 @@ public struct NetworkTrainer {
       let valueWeight = opts.get(option: "value-loss-weight", orElse: Float(1.0))
       let earlyStoppingPatience = opts.get(option: "early-stopping", orElse: 0)
       let weightDecay = opts.get(option: "weight-decay", orElse: Float(0.0))
+
+      // Print configuration
+      print("Configuration:")
+      print("  Input:            \(inputPath)")
+      print("  Output:           \(outputPath ?? "(none)")")
+      print("  Model:            \(modelPath ?? "(new)")")
+      print("  Epochs:           \(epochs)")
+      print("  Batch size:       \(batchSize)")
+      print("  Learning rate:    \(learningRate)")
+      print("  Weight decay:     \(weightDecay)")
+      print("  Validation split: \(String(format: "%.2f", validationSplit))")
+      print("  Optimizer:        \(optimizerName)")
+      print("  Policy weight:    \(policyWeight)")
+      print("  Value weight:     \(valueWeight)")
+      print("  Early stopping:   \(earlyStoppingPatience == 0 ? "disabled" : "\(earlyStoppingPatience) epochs")")
+      print("  Seed:             \(seed)")
 
       try trainModel(
          inputPath: inputPath,

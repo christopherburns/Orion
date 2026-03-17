@@ -134,8 +134,8 @@ struct MoveStatistics {
 public struct DataGenerator {
 
    static func registerOptions (opts: OptionParser) {
-      opts.addOption("Data Generator", "g", "game-count", "Number of self-play games to generate")
-      opts.addOption("Gameplay Tester", "a", "agent", "Path to model file, or name of non-model-based agent (optional, default is 'random')",
+      opts.addOption("Data Generator", "n", "game-count", "Number of self-play games to generate")
+      opts.addOption("Data Generator", "a", "agent", "Path to model file, or name of non-model-based agent (optional, default is 'random')",
          longDoc:
             "Specifies which agent(s) to use for gameplay. " +
             "If a path to a model file is provided (e.g., 'models/best.mlx'), " +
@@ -268,13 +268,14 @@ public struct DataGenerator {
       maxTurns: Int,
       outputPath: String) throws {
 
-      print("Generating training data:")
-      print("  Games: \(gameCount)")
+      print("Configuration:")
+      print("  Games:            \(gameCount)")
       print("  Players per game: \(playerCount)")
-      print("  Temperature: \(temperature)")
-      print("  Max turns: \(maxTurns)")
-      print("  Base seed: \(seed)")
-      print("  Output: \(outputPath)")
+      print("  Agent:            \(agentSpec.isEmpty ? "random" : agentSpec)")
+      print("  Temperature:      \(String(format: "%.2f", temperature))")
+      print("  Max turns:        \(maxTurns)")
+      print("  Seed:             \(seed)")
+      print("  Output:           \(outputPath)")
 
       // Initialize agent for self-play
       let agents = initializeAgents(playerCount: 1, agentSpecs: [agentSpec], seed: seed)

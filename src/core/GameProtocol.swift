@@ -2,6 +2,7 @@
 public enum GameTerminalCondition: Equatable {
    case playerWon(playerIndex: Int)
    case tied
+   case timedOut
    case inProgress
 }
 
