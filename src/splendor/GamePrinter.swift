@@ -2,13 +2,17 @@
 public class GamePrinter {
 
    // ANSI color codes
-   private static let red = "\u{001B}[31m"
-   private static let green = "\u{001B}[32m"
-   private static let blue = "\u{001B}[34m"
-   private static let white = "\u{001B}[37m"
-   private static let yellow = "\u{001B}[33m" // Using yellow for brown
-   private static let reset = "\u{001B}[0m"
-   private static let bold = "\u{001B}[1m"
+   private static let red         = "\u{001B}[31m"
+   private static let green       = "\u{001B}[32m"
+   private static let blue        = "\u{001B}[34m"
+   private static let white       = "\u{001B}[37m"
+   private static let yellow      = "\u{001B}[33m" // Using yellow for brown
+   private static let reset       = "\u{001B}[0m"
+   private static let bold        = "\u{001B}[1m"
+   private static let brightRed   = "\u{001B}[91m"
+   private static let brightYellow = "\u{001B}[93m"
+   private static let grey        = "\u{001B}[90m"
+   private static let dim         = "\u{001B}[2m"
 
    private static func gemColor (_ gem: GemType) -> String {
       switch gem {
@@ -419,6 +423,159 @@ public class GamePrinter {
       let totalShown = movesWithProbs.prefix(topN).reduce(0.0) { $0 + $1.prob }
       if movesWithProbs.count > topN {
          print("    ... (\(movesWithProbs.count - topN) more moves, \(String(format: "%.1f", (1.0 - totalShown) * 100.0))% probability)")
+      }
+   }
+
+   // ── Interactive mode ──────────────────────────────────────────────────────────
+
+   /// Format gem costs as colored squares, e.g. "2■(red) 1■(blue)"
+   private static func costString (_ price: [Int]) -> String {
+      let parts = price.enumerated().compactMap { (index, count) -> String? in
+         guard count > 0 else { return nil }
+         let gem = GemType(rawValue: index)!
+         return "\(gemColor(gem))\(count)■\(reset)"
+      }
+      return parts.isEmpty ? "free" : parts.joined(separator: " ")
+   }
+
+   /// Create a verbose, human-readable description of a move including card stats and gem costs
+   public static func describeMoveVerbose (_ move: Splendor.Game.Move, game: Splendor.Game) -> String {
+      switch move {
+
+      case .purchaseCard(let tier, let position):
+         guard tier < game.cardDecks.count && position < game.cardDecks[tier].count else {
+            return "Purchase tier-\(tier + 1) card (slot \(position + 1))"
+         }
+         let card = game.cardDecks[tier][position]
+         let cc = cardColor(card.color)
+         let pts = card.points > 0 ? "\(card.points)pt" : "0pt"
+         return "Purchase tier-\(tier + 1) \(cc)\(card.color.stringValue)\(reset) card [\(pts), produces \(cc)■\(reset), costs \(costString(card.price))]"
+
+      case .purchaseReservedCard(let position):
+         let player = game.players[game.currentPlayer]
+         guard position < player.reservedCards.count else {
+            return "Purchase reserved card (slot \(position + 1))"
+         }
+         let card = player.reservedCards[position]
+         let cc = cardColor(card.color)
+         let pts = card.points > 0 ? "\(card.points)pt" : "0pt"
+         return "Purchase reserved \(cc)\(card.color.stringValue)\(reset) card [\(pts), produces \(cc)■\(reset), costs \(costString(card.price))]"
+
+      case .takeThreeGems(let gems):
+         let available = gems.filter { game.supply[$0, default: 0] > 0 }
+         let gemDesc = gems.map { "\(gemColor($0))■\(reset) \($0.stringValue)" }.joined(separator: ", ")
+         if available.count < gems.count {
+            return "Take 3 gems: \(gemDesc) \(dim)(some depleted)\(reset)"
+         }
+         return "Take 3 gems: \(gemDesc)"
+
+      case .takeTwoGems(let gem):
+         let supply = game.supply[gem, default: 0]
+         return "Take 2 \(gemColor(gem))■\(reset) \(gem.stringValue) gems (supply: \(supply))"
+
+      case .reserveCard(let tier, let position):
+         guard tier < game.cardDecks.count && position < game.cardDecks[tier].count else {
+            return "Reserve tier-\(tier + 1) card (slot \(position + 1))"
+         }
+         let card = game.cardDecks[tier][position]
+         let cc = cardColor(card.color)
+         let pts = card.points > 0 ? "\(card.points)pt" : "0pt"
+         return "Reserve tier-\(tier + 1) \(cc)\(card.color.stringValue)\(reset) card [\(pts), produces \(cc)■\(reset), costs \(costString(card.price))] + \(brightYellow)★\(reset) gold"
+
+      case .discardGem(let gemType):
+         let player = game.players[game.currentPlayer]
+         let have = player.gems[gemType.rawValue]
+         return "Discard \(gemColor(gemType))■\(reset) \(gemType.stringValue) gem (you have \(have))"
+
+      case .discardGoldGem:
+         let player = game.players[game.currentPlayer]
+         return "Discard \(brightYellow)★\(reset) gold gem (you have \(player.goldGems))"
+      }
+   }
+
+   /// Show the chosen card in full when the CPU selects a card move
+   private static func printChosenCard (_ move: Splendor.Game.Move, game: Splendor.Game) {
+      let card: Card?
+      let label: String
+      switch move {
+      case .purchaseCard(let tier, let position):
+         card = (tier < game.cardDecks.count && position < game.cardDecks[tier].count) ? game.cardDecks[tier][position] : nil
+         label = "Card being purchased:"
+      case .purchaseReservedCard(let position):
+         let player = game.players[game.currentPlayer]
+         card = position < player.reservedCards.count ? player.reservedCards[position] : nil
+         label = "Reserved card being purchased:"
+      case .reserveCard(let tier, let position):
+         card = (tier < game.cardDecks.count && position < game.cardDecks[tier].count) ? game.cardDecks[tier][position] : nil
+         label = "Card being reserved:"
+      default:
+         return
+      }
+      guard let c = card else { return }
+      print("\n  \(bold)\(label)\(reset)")
+      let rendered = formatCard(c).split(separator: "\n", omittingEmptySubsequences: false)
+      for line in rendered {
+         print("  " + line)
+      }
+   }
+
+   /// Display a numbered move menu with heat-colored probability bars for a CPU turn.
+   /// Moves are sorted by probability (highest first). The chosen move is marked.
+   public static func presentCPUMoveMenu (
+      playerIndex: Int,
+      legalMoveIndices: [Int],
+      probabilities: [Float],
+      chosenIndex: Int,
+      game: Splendor.Game) {
+
+      let BAR_WIDTH = 20
+      let sorted = legalMoveIndices.sorted { probabilities[$0] > probabilities[$1] }
+
+      print("\n\(bold)Player \(playerIndex + 1) (CPU) legal moves:\(reset)")
+
+      for (menuNum, moveIdx) in sorted.enumerated() {
+         let prob = probabilities[moveIdx]
+         let barFilled = Int((prob * Float(BAR_WIDTH)).rounded())
+         let bar = String(repeating: "█", count: barFilled)
+            + String(repeating: "░", count: BAR_WIDTH - barFilled)
+
+         let barColor: String
+         if prob > 0.50      { barColor = brightRed    }
+         else if prob > 0.20 { barColor = brightYellow }
+         else if prob > 0.05 { barColor = green        }
+         else                { barColor = grey         }
+
+         let isChosen = moveIdx == chosenIndex
+         let marker   = isChosen ? "  \(bold)◀ CHOSEN\(reset)" : ""
+         let numStr   = String(format: "%3d.", menuNum + 1)
+         let probStr  = String(format: "%5.1f%%", prob * 100.0)
+         let desc     = describeMoveVerbose(game.move(atIndex: moveIdx), game: game)
+
+         let line = "\(numStr)  \(barColor)\(bar)\(reset)  \(probStr)  \(desc)\(marker)"
+         if isChosen {
+            print("\(bold)\(line)\(reset)")
+         } else {
+            print(line)
+         }
+      }
+
+      // Show the chosen card in full
+      printChosenCard(game.move(atIndex: chosenIndex), game: game)
+   }
+
+   /// Display a numbered move menu for a human player to choose from.
+   /// Moves are shown in canonical order (matches the board layout).
+   public static func presentHumanMoveMenu (
+      playerIndex: Int,
+      legalMoveIndices: [Int],
+      game: Splendor.Game) {
+
+      print("\n\(bold)Player \(playerIndex + 1) (You) — choose a move:\(reset)")
+
+      for (menuNum, moveIdx) in legalMoveIndices.enumerated() {
+         let numStr = String(format: "%3d.", menuNum + 1)
+         let desc   = describeMoveVerbose(game.move(atIndex: moveIdx), game: game)
+         print("\(numStr)  \(desc)")
       }
    }
 

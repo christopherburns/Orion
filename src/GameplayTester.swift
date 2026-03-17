@@ -173,6 +173,112 @@ public struct GameplayTester {
    }
 
 
+   /// Interactive game loop for human vs CPU play.
+   /// Prints board + player state before every turn. Human players get a numbered
+   /// move menu; CPU players see heat-colored probability bars with the chosen move
+   /// highlighted and a card panel when applicable.
+   static func playGameInteractive (
+      playerCount: Int,
+      seed: UInt64,
+      agents: [any AgentProtocol],
+      maxTurns: Int = 1000) -> (GameTerminalCondition, Int) {
+
+      precondition(agents.count == playerCount, "Number of agents must match player count")
+
+      guard var g = Splendor.Game(playerCount: playerCount, seed: seed) else {
+         print("Error: Failed to create game state")
+         return (.inProgress, 0)
+      }
+
+      var timedOut = false
+
+      while case .inProgress = g.terminalCondition {
+         if g.currentTurn >= maxTurns {
+            timedOut = true
+            break
+         }
+
+         // Print current board and all player states
+         GamePrinter.present(g)
+         for (i, player) in g.players.enumerated() {
+            GamePrinter.presentPlayer(player, playerIndex: i)
+         }
+
+         let currentAgent  = agents[g.currentPlayer]
+         let validMoveMask = g.legalMoveMaskForCurrentPlayer()
+         let legalIndices  = validMoveMask.indices.filter { validMoveMask[$0] }
+
+         let moveIndex: Int
+
+         if currentAgent.isHuman {
+            // ── Human turn ────────────────────────────────────────────────
+            GamePrinter.presentHumanMoveMenu(
+               playerIndex: g.currentPlayer,
+               legalMoveIndices: legalIndices,
+               game: g)
+
+            var chosen: Int? = nil
+            while chosen == nil {
+               print("\nEnter move (1–\(legalIndices.count)): ", terminator: "")
+               fflush(stdout)
+               if let line = readLine(), let n = Int(line.trimmingCharacters(in: .whitespaces)),
+                  n >= 1 && n <= legalIndices.count {
+                  chosen = legalIndices[n - 1]
+               } else {
+                  print("Invalid choice — enter a number between 1 and \(legalIndices.count).")
+               }
+            }
+            moveIndex = chosen!
+
+         } else {
+            // ── CPU turn ──────────────────────────────────────────────────
+            let (policyLogits, _) = currentAgent.predict(game: g, currentPlayerIndex: g.currentPlayer)
+
+            // Greedy move selection
+            guard let greedyIndex = sampleMove(validMoveMask: validMoveMask, movePreferences: policyLogits) else {
+               preconditionFailure("CPU player \(g.currentPlayer) has no legal moves")
+            }
+            moveIndex = greedyIndex
+
+            // Compute softmax probabilities over ALL moves for display (temperature = 1)
+            let probs = computeMoveProbabilities(logits: policyLogits, validMoveMask: validMoveMask)
+               ?? Array(repeating: 0.0, count: policyLogits.count)
+
+            GamePrinter.presentCPUMoveMenu(
+               playerIndex: g.currentPlayer,
+               legalMoveIndices: legalIndices,
+               probabilities: probs,
+               chosenIndex: moveIndex,
+               game: g)
+
+            print("\nPress enter to continue…", terminator: "")
+            fflush(stdout)
+            _ = readLine()
+         }
+
+         g.applyMove(canonicalMoveIndex: moveIndex)
+      }
+
+      // Print final board state
+      print("\n" + String(repeating: "═", count: 80))
+      GamePrinter.present(g)
+      for (i, player) in g.players.enumerated() {
+         GamePrinter.presentPlayer(player, playerIndex: i)
+      }
+
+      if timedOut {
+         print("Game ended: turn limit (\(maxTurns)) reached.")
+      } else if case .playerWon(let winner) = g.terminalCondition {
+         let tag = agents[winner].isHuman ? "You win!" : "CPU wins."
+         print("\(tag) Player \(winner + 1) reached \(g.players[winner].score) points in \(g.currentTurn) turns.")
+      } else {
+         print("Game tied after \(g.currentTurn) turns.")
+      }
+
+      return (timedOut ? .timedOut : g.terminalCondition, g.currentTurn)
+   }
+
+
    public static func main () throws {
       let opts = OptionParser(help: "Play Splendor games using neural network or random agents")
       self.registerOptions(opts: opts)
@@ -199,6 +305,15 @@ public struct GameplayTester {
 
       // Initialize agents based on command-line specifications
       let agents = initializeAgents(playerCount: playerCount, agentSpecs: agentSpecs, seed: seed)
+
+      // Interactive mode: any human player triggers a single interactive game
+      if agents.contains(where: { $0.isHuman }) {
+         if gameCount > 1 {
+            print("Note: interactive mode — game count overridden to 1.")
+         }
+         _ = playGameInteractive(playerCount: playerCount, seed: seed, agents: agents, maxTurns: maxTurns)
+         return
+      }
 
       var gameResults: [(GameTerminalCondition, Int)] = []
       var totalTurnCount = 0

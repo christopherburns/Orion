@@ -19,7 +19,8 @@ import Utility
 //
 // 3. PLAY - Play games for testing and evaluation
 //    Usage: orion play [options]
-//    Example: orion play -n 100 -m models/best.mlx -m2 models/random
+//    Example: orion play -n 100 -a models/best.mlx random
+//    Interactive: orion play -a human models/best.mlx
 //
 // Use --help with any tool to see available options.
 
