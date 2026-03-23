@@ -35,6 +35,7 @@ public class PolicyValueNetwork: Module {
 
    public static let INPUT_DIMENSIONS = 361 // Matches game's state embedding size (updated for gold gem supply)
    public static let POLICY_DIMENSIONS = 48 // Matches game's move space (42 normal + 6 discard)
+   public static let HIDDEN_DIMENSIONS = 512
 
    // Current architecture version - increment when architecture changes
    public static let ARCHITECTURE_VERSION = 3
@@ -70,9 +71,12 @@ public class PolicyValueNetwork: Module {
       }
 
       // Shared trunk: 360 -> 512 -> 512 -> 256
-      self.dense1 = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: PolicyValueNetwork.INPUT_DIMENSIONS, outputDimensions: 512, key: seed == nil ? nil : keys[0]))
-      self.dense2 = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 512, outputDimensions: 512, key: seed == nil ? nil : keys[1]))
-      self.dense3 = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 512, outputDimensions: 256, key: seed == nil ? nil : keys[2]))
+      self.dense1 = Linear(weight: PolicyValueNetwork.heInitialization(
+         inputDimensions: PolicyValueNetwork.INPUT_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[0]))
+      self.dense2 = Linear(weight: PolicyValueNetwork.heInitialization(
+         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[1]))
+      self.dense3 = Linear(weight: PolicyValueNetwork.heInitialization(
+         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[2]))
 
       // Dropout layers
       self.dropout1 = Dropout(p: 0.3)
@@ -80,11 +84,14 @@ public class PolicyValueNetwork: Module {
       self.dropout3 = Dropout(p: 0.3)
 
       // Policy head: 256 -> 48 logits
-      self.policyHead = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 256, outputDimensions: PolicyValueNetwork.POLICY_DIMENSIONS, key: seed == nil ? nil : keys[3]))
+      self.policyHead = Linear(weight: PolicyValueNetwork.heInitialization(
+         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.POLICY_DIMENSIONS, key: seed == nil ? nil : keys[3]))
 
       // Value head: 256 -> 128 -> 1
-      self.valueHidden = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 256, outputDimensions: 128, key: seed == nil ? nil : keys[4]), bias: MLXArray.zeros([128]))
-      self.valueOutput = Linear(weight: PolicyValueNetwork.heInitialization(inputDimensions: 128, outputDimensions: 1, key: seed == nil ? nil : keys[5]), bias: MLXArray.zeros([1]))
+      self.valueHidden = Linear(weight: PolicyValueNetwork.heInitialization(
+         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: 128, key: seed == nil ? nil : keys[4]), bias: MLXArray.zeros([128]))
+      self.valueOutput = Linear(weight: PolicyValueNetwork.heInitialization(
+         inputDimensions: 128, outputDimensions: 1, key: seed == nil ? nil : keys[5]), bias: MLXArray.zeros([1]))
 
       super.init()
    }
