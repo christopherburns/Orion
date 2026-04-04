@@ -102,7 +102,7 @@ public struct PlayerState {
       for card in self.cards {
          power[card.color.rawValue] += 1.0
       }
-      encoded.append(contentsOf: power.map { Float16($0) })
+      encoded.append(contentsOf: power.map { Float16($0) / 7.0 })
 
       // reserved card count + 3 reserved cards × 11 floats each (1 point + 5 price + 5 color one-hot)
       encoded.append(Float16(self.reservedCards.count) / 3.0)
