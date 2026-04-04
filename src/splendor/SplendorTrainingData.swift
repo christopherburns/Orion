@@ -5,7 +5,7 @@ import Compression
 public struct TrainingExample: Codable {
    public let turnNumber: Int
    public let playerIndex: Int
-   public let state: [Float]  // 361-dimensional game state encoding
+   public let state: [Float]  // 360-dimensional game state encoding
    public let policy: [Float]  // 48-dimensional policy target (probability distribution over moves)
    public let value: Float  // Value target from this player's perspective (-1, 0, or 1)
 
@@ -88,6 +88,18 @@ public struct TrainingDataset: Codable {
       self.games = games
    }
 
+   // MARK: - Binary format constants
+
+   /// Magic bytes to identify binary training data files
+   private static let MAGIC: UInt32 = 0x4F52494E  // "ORIN"
+   private static let FORMAT_VERSION: UInt32 = 1
+   private static let STATE_DIM: Int = 361
+   private static let POLICY_DIM: Int = 48
+   /// Bytes per example: (360 + 48 + 1) * 4 = 1636
+   private static let BYTES_PER_EXAMPLE: Int = (STATE_DIM + POLICY_DIM + 1) * MemoryLayout<Float>.size
+
+   // MARK: - Load
+
    /// Load training dataset from file or directory
    public static func load (from path: String) throws -> TrainingDataset {
       let url = URL(fileURLWithPath: path)
@@ -96,11 +108,12 @@ public struct TrainingDataset: Codable {
       var isDirectory: ObjCBool = false
       if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) {
          if isDirectory.boolValue {
-            // Load all data files from directory
             let files = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
-            fileURLs = files.filter { $0.pathExtension == "json" || $0.pathExtension == "gz" }
+            fileURLs = files.filter {
+               let ext = $0.pathExtension
+               return ext == "json" || ext == "gz" || ext == "lz4"
+            }
          } else {
-            // Single file
             fileURLs = [url]
          }
       } else {
@@ -120,50 +133,171 @@ public struct TrainingDataset: Codable {
          allGames.append(contentsOf: dataset.games)
       }
 
-      // Create merged dataset
       let totalExamples = allGames.reduce(0) { $0 + $1.examples.count }
       return TrainingDataset(
          generatedAt: Date().iso8601,
          modelPath: nil,
-         temperature: 0.0, // Not meaningful for merged dataset
+         temperature: 0.0,
          totalGames: allGames.count,
          totalExamples: totalExamples,
          games: allGames
       )
    }
 
-   /// Save dataset to compressed JSON format
+   // MARK: - Save (binary)
+
+   /// Save dataset in binary format with LZ4 compression.
+   ///
+   /// Binary layout (before compression):
+   ///   [4 bytes] magic "ORIN"
+   ///   [4 bytes] format version (1)
+   ///   [4 bytes] state dimensions (360)
+   ///   [4 bytes] policy dimensions (48)
+   ///   [4 bytes] total games (UInt32)
+   ///   [4 bytes] total examples (UInt32)
+   ///   [N * BYTES_PER_EXAMPLE bytes] packed examples:
+   ///       [360 * Float32] state
+   ///       [48 * Float32]  policy
+   ///       [1 * Float32]   value
    public func save (to path: String, compress: Bool = true) throws {
-      let finalPath = compress ? (path + ".gz") : (path + ".json")
+      let finalPath = path + ".bin.lz4"
       let url = URL(fileURLWithPath: finalPath)
       let dir = url.deletingLastPathComponent()
       try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
 
-      let encoder = JSONEncoder()
-      let jsonData = try encoder.encode(self)
+      let exampleCount = games.reduce(0) { $0 + $1.examples.count }
+      let headerSize = 6 * MemoryLayout<UInt32>.size  // 24 bytes
+      let bodySize = exampleCount * Self.BYTES_PER_EXAMPLE
+      let totalSize = headerSize + bodySize
 
-      if compress {
-         let compressed = try compressData(jsonData)
-         try compressed.write(to: url)
-         print("File written successfully to \(finalPath) (\(jsonData.count) bytes -> \(compressed.count) bytes).")
+      var buffer = Data(count: totalSize)
+
+      buffer.withUnsafeMutableBytes { raw in
+         let ptr = raw.baseAddress!
+
+         // Header
+         ptr.storeBytes(of: Self.MAGIC, as: UInt32.self)
+         ptr.storeBytes(of: Self.FORMAT_VERSION, toByteOffset: 4, as: UInt32.self)
+         ptr.storeBytes(of: UInt32(Self.STATE_DIM), toByteOffset: 8, as: UInt32.self)
+         ptr.storeBytes(of: UInt32(Self.POLICY_DIM), toByteOffset: 12, as: UInt32.self)
+         ptr.storeBytes(of: UInt32(totalGames), toByteOffset: 16, as: UInt32.self)
+         ptr.storeBytes(of: UInt32(exampleCount), toByteOffset: 20, as: UInt32.self)
+
+         // Body — pack examples contiguously
+         var offset = headerSize
+         for game in games {
+            for example in game.examples {
+               // State: 360 floats
+               for f in example.state {
+                  ptr.storeBytes(of: f, toByteOffset: offset, as: Float.self)
+                  offset += 4
+               }
+               // Policy: 48 floats
+               for f in example.policy {
+                  ptr.storeBytes(of: f, toByteOffset: offset, as: Float.self)
+                  offset += 4
+               }
+               // Value: 1 float
+               ptr.storeBytes(of: example.value, toByteOffset: offset, as: Float.self)
+               offset += 4
+            }
+         }
+      }
+
+      let compressed = try compressData(buffer)
+      try compressed.write(to: url)
+      print("File written successfully to \(finalPath) (\(totalSize) bytes -> \(compressed.count) bytes).")
+   }
+
+   // MARK: - Load single file (format dispatch)
+
+   private static func loadSingleFile (from url: URL) throws -> TrainingDataset {
+      if url.pathExtension == "lz4" {
+         return try loadBinaryFile(from: url)
       } else {
-         try jsonData.write(to: url)
-         print("File written successfully to \(finalPath) (\(jsonData.count) bytes).")
+         return try loadJSONFile(from: url)
       }
    }
 
-
-   /// Load a single file (compressed or uncompressed JSON)
-   private static func loadSingleFile (from url: URL) throws -> TrainingDataset {
+   /// Load legacy JSON format (.json or .gz)
+   private static func loadJSONFile (from url: URL) throws -> TrainingDataset {
       var data = try Data(contentsOf: url)
-
-      // Decompress if .gz extension
       if url.pathExtension == "gz" {
          data = try decompressData(data)
       }
-
       let decoder = JSONDecoder()
       return try decoder.decode(TrainingDataset.self, from: data)
+   }
+
+   /// Load binary format (.bin.lz4)
+   private static func loadBinaryFile (from url: URL) throws -> TrainingDataset {
+      let compressed = try Data(contentsOf: url)
+      let data = try decompressData(compressed)
+
+      return try data.withUnsafeBytes { raw in
+         let ptr = raw.baseAddress!
+         let totalBytes = raw.count
+
+         guard totalBytes >= 24 else {
+            throw NSError(domain: "TrainingDataset", code: 6,
+               userInfo: [NSLocalizedDescriptionKey: "Binary file too small: \(totalBytes) bytes"])
+         }
+
+         let magic = ptr.load(as: UInt32.self)
+         guard magic == MAGIC else {
+            throw NSError(domain: "TrainingDataset", code: 6,
+               userInfo: [NSLocalizedDescriptionKey: "Bad magic: expected 0x\(String(MAGIC, radix: 16)), got 0x\(String(magic, radix: 16))"])
+         }
+
+         let version = ptr.load(fromByteOffset: 4, as: UInt32.self)
+         guard version == FORMAT_VERSION else {
+            throw NSError(domain: "TrainingDataset", code: 6,
+               userInfo: [NSLocalizedDescriptionKey: "Unsupported format version: \(version)"])
+         }
+
+         let stateDim = Int(ptr.load(fromByteOffset: 8, as: UInt32.self))
+         let policyDim = Int(ptr.load(fromByteOffset: 12, as: UInt32.self))
+         let gameCount = Int(ptr.load(fromByteOffset: 16, as: UInt32.self))
+         let exampleCount = Int(ptr.load(fromByteOffset: 20, as: UInt32.self))
+
+         let bytesPerExample = (stateDim + policyDim + 1) * MemoryLayout<Float>.size
+         let expectedSize = 24 + exampleCount * bytesPerExample
+         guard totalBytes >= expectedSize else {
+            throw NSError(domain: "TrainingDataset", code: 6,
+               userInfo: [NSLocalizedDescriptionKey: "Binary file truncated: expected \(expectedSize) bytes, got \(totalBytes)"])
+         }
+
+         // Read all examples into a single flat game (structure doesn't matter for training)
+         var examples: [TrainingExample] = []
+         examples.reserveCapacity(exampleCount)
+
+         var offset = 24
+         for _ in 0..<exampleCount {
+            let statePtr = (ptr + offset).assumingMemoryBound(to: Float.self)
+            let state = Array(UnsafeBufferPointer(start: statePtr, count: stateDim))
+            offset += stateDim * 4
+
+            let policyPtr = (ptr + offset).assumingMemoryBound(to: Float.self)
+            let policy = Array(UnsafeBufferPointer(start: policyPtr, count: policyDim))
+            offset += policyDim * 4
+
+            let value = (ptr + offset).load(as: Float.self)
+            offset += 4
+
+            examples.append(TrainingExample(
+               turnNumber: 0, playerIndex: 0,
+               state: state, policy: policy, value: value))
+         }
+
+         let game = GameData(
+            gameIndex: 0, seed: 0, playerCount: 2, winner: nil,
+            turnCount: examples.count, examples: examples, moves: [])
+
+         return TrainingDataset(
+            generatedAt: "", modelPath: nil, temperature: 0.0,
+            totalGames: gameCount, totalExamples: exampleCount,
+            games: [game])
+      }
    }
 }
 
@@ -185,11 +319,13 @@ fileprivate func compressData (_ data: Data) throws -> Data {
                       userInfo: [NSLocalizedDescriptionKey: "Invalid data buffer"])
       }
       let buffer = baseAddress.assumingMemoryBound(to: UInt8.self)
-      let destinationBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: data.count)
+      // LZ4 can expand incompressible data; worst case is input + input/255 + 16
+      let capacity = data.count + data.count / 255 + 16
+      let destinationBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
       defer { destinationBuffer.deallocate() }
 
       let compressedSize = compression_encode_buffer(
-         destinationBuffer, data.count,
+         destinationBuffer, capacity,
          buffer, data.count,
          nil, COMPRESSION_LZ4)
 
@@ -210,7 +346,7 @@ fileprivate func decompressData (_ data: Data) throws -> Data {
       }
       let buffer = baseAddress.assumingMemoryBound(to: UInt8.self)
 
-      // Start with a large buffer - JSON compresses well so ratio can be high
+      // Start with a large buffer - training data can be large
       var capacity = data.count * 20
       var destinationBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
 

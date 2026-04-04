@@ -5,20 +5,22 @@ Usage:
    iterative_gameplay.py [options]
 
 Options:
-   --initial-games N       Games to generate in the first cycle                    [default: 1000]
-   --games-per-cycle N     Games to generate in subsequent cycles                  [default: 1000]
+   --initial-games N       Games to generate in the first cycle                    [default: 5000]
+   --games-per-cycle N     Games to generate in subsequent cycles                  [default: 5000]
    --epochs N              Training epochs per cycle                               [default: 100]
    --batch-size N          Training batch size                                     [default: 128]
-   --cycles N              Total number of cycles to run                           [default: 10]
+   --cycles N              Total number of cycles to run                           [default: 15]
    --eval-games N          Games to play when evaluating                           [default: 500]
    --champion-threshold N  Min win rate vs previous to accept new model (0=off)   [default: 0.52]
    --early-stopping N      Stop training after N epochs w/out improvement (0=off)  [default: 10]
    --initial-temp TEMP     Sampling temperature for cycle 1                        [default: 1.5]
    --final-temp TEMP       Sampling temperature for the last cycle                 [default: 0.5]
    --learning-rate R       Learning rate for cycle 1                               [default: 0.0003]
-   --lr-decay R            Multiplicative LR decay per cycle (1.0 = no decay)     [default: 1.0]
-   --weight-decay N        Weight decay rate                                       [default: 0.01]
+   --lr-decay R            Multiplicative LR decay per cycle (1.0 = no decay)     [default: 0.95]
+   --weight-decay N        Weight decay rate                                       [default: 0.0]
    --eval-temp TEMP        Sampling temperature during evaluation (0=greedy)       [default: 0]
+   --min-policy-weight N   Min policy weight for losers (0=ignore, 1=equal)        [default: 0.5]
+   --dropout N             Dropout rate for trunk layers (0=disabled)               [default: 0.1]
    --accumulate-data       Train on all previous cycles' data, not just the latest
    --data-dir DIR          Directory for generated training data                   [default: trainingdata]
    --model-dir DIR         Directory for saved models                              [default: models]
@@ -53,20 +55,22 @@ from docopt import docopt
 
 @dataclass
 class Config:
-   initialGames:    int   = 1000
-   gamesPerCycle:   int   = 50
+   initialGames:    int   = 5000
+   gamesPerCycle:   int   = 5000
    epochs:          int   = 100
    batchSize:       int   = 128
-   maxCycles:       int   = 10
-   evalGames:        int   = 50
+   maxCycles:       int   = 15
+   evalGames:        int   = 500
    championThreshold: float = 0.52  # min win rate vs previous to accept new model (0 = disabled)
    earlyStopping:    int   = 10   # epochs without improvement before stopping (0 = disabled)
    initialTemp:     float = 1.5
    finalTemp:       float = 0.5
    learningRate:    float = 0.0003
-   lrDecay:         float = 1.0
-   weightDecay:     float = 0.01
+   lrDecay:         float = 0.95
+   weightDecay:     float = 0.0
    evalTemp:        float = 0
+   minPolicyWeight: float = 0.5   # min policy weight for losers (0=ignore losers, 1=equal weight)
+   dropout:         float = 0.1   # dropout rate for trunk layers (0=disabled)
    accumulateData:  bool  = False
    dataDir:         str   = "trainingdata"
    modelDir:        str   = "models"
@@ -76,9 +80,22 @@ class Config:
 
 # ── Shell helpers ──────────────────────────────────────────────────────────────
 
+_command_log: str | None = None   # set in main()
+
+BOLD_CYAN  = "\033[1;36m"
+RESET      = "\033[0m"
+
+def _logCommand (args: list[str], suffix: str = ""):
+   """Print command prominently and append to the command log."""
+   cmd = " ".join(args) + (f"  {suffix}" if suffix else "")
+   print(f"\n{BOLD_CYAN}▶ {cmd}{RESET}")
+   if _command_log:
+      with open(_command_log, "a") as f:
+         f.write(cmd + "\n")
+
 def run (args: list[str], label: str) -> int:
    """Run a subprocess, streaming its output. Returns exit code."""
-   print(f"\n$ {' '.join(args)}")
+   _logCommand(args)
    result = subprocess.run(args)
    if result.returncode != 0:
       print(f"[ERROR] '{label}' exited with code {result.returncode}", file=sys.stderr)
@@ -112,7 +129,7 @@ def generateInitialData (cfg: Config, outputPath: str) -> bool:
    return run(args, "generate-initial") == 0
 
 
-def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: float, prevModelPath: str | None = None) -> bool:
+def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: float, prevModelPath: str | None = None, minPolicyWeight: float = 0.0) -> bool:
    """Train (or fine-tune) a model on inputPath, saving weights to outputPath."""
    args = [
       cfg.binary, "train",
@@ -123,6 +140,8 @@ def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: floa
       "--learning-rate", str(learningRate),
       "--weight-decay", str(cfg.weightDecay),
       "--early-stopping", str(cfg.earlyStopping),
+      "--min-policy-weight", str(minPolicyWeight),
+      "--dropout", str(cfg.dropout),
    ]
    if prevModelPath is not None:
       args += ["-m", prevModelPath]
@@ -142,7 +161,7 @@ def evaluateVsRandom (cfg: Config, modelPath: str, outputFile: str) -> bool:
       "-a", modelPath, "random",
       "-t", f"{cfg.evalTemp:.2f}",
    ]
-   print(f"\n$ {' '.join(args)}  > {outputFile}")
+   _logCommand(args, f"> {outputFile}")
    with open(outputFile, "w") as f:
       result = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT)
    print(f"Evaluation results saved to {outputFile}")
@@ -157,7 +176,7 @@ def evaluateVsPrevious (cfg: Config, modelPath: str, prevModelPath: str, outputF
       "-a", modelPath, prevModelPath,
       "-t", f"{cfg.evalTemp:.2f}",
    ]
-   print(f"\n$ {' '.join(args)}  > {outputFile}")
+   _logCommand(args, f"> {outputFile}")
    with open(outputFile, "w") as f:
       result = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT)
    print(f"Evaluation results saved to {outputFile}")
@@ -221,8 +240,8 @@ def runFirstCycle (cfg: Config) -> str:
    print(f"\n=== Cycle 1: Training model ===")
    model = modelPath(cfg, 1)
    lr = cycleLearningRate(cfg, 1)
-   trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.gz"
-   if not trainModel(cfg, trainingInput, model, learningRate=lr):
+   trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.bin.lz4"
+   if not trainModel(cfg, trainingInput, model, learningRate=lr, minPolicyWeight=0.0):
       sys.exit(1)
 
    print(f"\n=== Cycle 1: Evaluating model vs random ===")
@@ -244,8 +263,8 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> str:
    currentModel = modelPath(cfg, cycle)
    lr = cycleLearningRate(cfg, cycle)
    print(f"Training model (continuing from previous cycle, LR={lr:.6f})...")
-   trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.gz"
-   if not trainModel(cfg, trainingInput, currentModel, learningRate=lr, prevModelPath=f"{prevModel}/"):
+   trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.bin.lz4"
+   if not trainModel(cfg, trainingInput, currentModel, learningRate=lr, prevModelPath=f"{prevModel}/", minPolicyWeight=cfg.minPolicyWeight):
       sys.exit(1)
 
    print("Evaluating model vs random...")
@@ -286,6 +305,8 @@ def configFromArgs (args: dict) -> Config:
       lrDecay       = float(args["--lr-decay"]),
       weightDecay   = float(args["--weight-decay"]),
       evalTemp      = float(args["--eval-temp"]),
+      minPolicyWeight = float(args["--min-policy-weight"]),
+      dropout       = float(args["--dropout"]),
       accumulateData = bool(args["--accumulate-data"]),
       dataDir       = args["--data-dir"],
       modelDir      = args["--model-dir"],
@@ -295,11 +316,16 @@ def configFromArgs (args: dict) -> Config:
 
 
 def main ():
+   global _command_log
    cfg = configFromArgs(docopt(__doc__))
 
    os.makedirs(cfg.dataDir,  exist_ok=True)
    os.makedirs(cfg.modelDir, exist_ok=True)
    os.makedirs(cfg.evalDir,  exist_ok=True)
+
+   _command_log = os.path.join(cfg.evalDir, "commands.log")
+   with open(_command_log, "w") as f:
+      f.write(f"# Orion training run — {__import__('datetime').datetime.now().isoformat()}\n")
 
    currentModel = runFirstCycle(cfg)
 

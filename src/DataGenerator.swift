@@ -338,7 +338,7 @@ public struct DataGenerator {
       print("  Successful games: \(successfulGames)/\(gameCount)")
       print("  Total training examples: \(totalExamples)")
       print("  Average examples per game: \(totalExamples / max(successfulGames, 1))")
-      print("  Saved to: \(outputPath).gz")
+      print("  Saved to: \(outputPath).bin.lz4")
 
       // Print move statistics
       print("\nComputing move statistics...")

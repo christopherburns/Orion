@@ -36,6 +36,7 @@ public class PolicyValueNetwork: Module {
    public static let INPUT_DIMENSIONS = 361 // Matches game's state embedding size (updated for gold gem supply)
    public static let POLICY_DIMENSIONS = 48 // Matches game's move space (42 normal + 6 discard)
    public static let HIDDEN_DIMENSIONS = 512
+   public static let DEFAULT_DROPOUT: Float = 0.1
 
    // Current architecture version - increment when architecture changes
    public static let ARCHITECTURE_VERSION = 3
@@ -50,6 +51,9 @@ public class PolicyValueNetwork: Module {
    let dropout2: Dropout
    let dropout3: Dropout
 
+   /// The dropout rate used by this network instance (stored for serialization)
+   public let dropoutRate: Float
+
    // Policy head (outputs move logits)
    let policyHead: Linear
 
@@ -59,7 +63,10 @@ public class PolicyValueNetwork: Module {
 
    /// Initialize network with optional seed for deterministic weight initialization
    /// - Parameter seed: If provided, weights will be initialized deterministically
-   public init (seed: UInt64? = nil) {
+   /// - Parameter dropoutRate: Dropout probability for trunk layers (default: 0.1)
+   public init (seed: UInt64? = nil, dropoutRate: Float = DEFAULT_DROPOUT) {
+      self.dropoutRate = dropoutRate
+
       // Create deterministic key if seed provided
       let keys: [MLXArray]
       if let seed = seed {
@@ -79,9 +86,9 @@ public class PolicyValueNetwork: Module {
          inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[2]))
 
       // Dropout layers
-      self.dropout1 = Dropout(p: 0.3)
-      self.dropout2 = Dropout(p: 0.3)
-      self.dropout3 = Dropout(p: 0.3)
+      self.dropout1 = Dropout(p: dropoutRate)
+      self.dropout2 = Dropout(p: dropoutRate)
+      self.dropout3 = Dropout(p: dropoutRate)
 
       // Policy head: 256 -> 48 logits
       self.policyHead = Linear(weight: PolicyValueNetwork.heInitialization(
@@ -96,18 +103,20 @@ public class PolicyValueNetwork: Module {
       super.init()
    }
 
-   /// Private initializer that takes weights directly (for cloning)
+   /// Private initializer that takes weights directly (for cloning and loading)
    private init (
       dense1Weight: MLXArray, dense2Weight: MLXArray, dense3Weight: MLXArray,
       policyHeadWeight: MLXArray,
       valueHiddenWeight: MLXArray, valueHiddenBias: MLXArray,
-      valueOutputWeight: MLXArray, valueOutputBias: MLXArray) {
+      valueOutputWeight: MLXArray, valueOutputBias: MLXArray,
+      dropoutRate: Float = DEFAULT_DROPOUT) {
+      self.dropoutRate = dropoutRate
       self.dense1 = Linear(weight: dense1Weight)
       self.dense2 = Linear(weight: dense2Weight)
       self.dense3 = Linear(weight: dense3Weight)
-      self.dropout1 = Dropout(p: 0.3)
-      self.dropout2 = Dropout(p: 0.3)
-      self.dropout3 = Dropout(p: 0.3)
+      self.dropout1 = Dropout(p: dropoutRate)
+      self.dropout2 = Dropout(p: dropoutRate)
+      self.dropout3 = Dropout(p: dropoutRate)
       self.policyHead = Linear(weight: policyHeadWeight)
       self.valueHidden = Linear(weight: valueHiddenWeight, bias: valueHiddenBias)
       self.valueOutput = Linear(weight: valueOutputWeight, bias: valueOutputBias)
@@ -115,7 +124,7 @@ public class PolicyValueNetwork: Module {
    }
 
    /// Convenience initializer for non-deterministic initialization
-   override convenience init () {
+   convenience override init () {
       self.init(seed: nil)
    }
 
@@ -151,7 +160,8 @@ public class PolicyValueNetwork: Module {
          valueHiddenWeight: valueHiddenWeight,
          valueHiddenBias: valueHiddenBias,
          valueOutputWeight: valueOutputWeight,
-         valueOutputBias: valueOutputBias)
+         valueOutputBias: valueOutputBias,
+         dropoutRate: self.dropoutRate)
    }
 
    /// Initialize a linear layer with He initialization
@@ -234,11 +244,12 @@ public class PolicyValueNetwork: Module {
       let metadataData = try metadataEncoder.encode(metadata)
       try metadataData.write(to: metadataURL)
 
-      // Save architecture info
+      // Save architecture info (including dropout rate for reproducibility)
       let architectureInfo: [String: Any] = [
          "architectureVersion": PolicyValueNetwork.ARCHITECTURE_VERSION,
          "inputDimensions": PolicyValueNetwork.INPUT_DIMENSIONS,
-         "policyDimensions": PolicyValueNetwork.POLICY_DIMENSIONS
+         "policyDimensions": PolicyValueNetwork.POLICY_DIMENSIONS,
+         "dropoutRate": dropoutRate
       ]
       let architectureURL = url.appendingPathComponent("architecture.json")
       let architectureData = try JSONSerialization.data(withJSONObject: architectureInfo, options: .prettyPrinted)
@@ -267,6 +278,9 @@ public class PolicyValueNetwork: Module {
          throw NSError(domain: "PolicyValueNetwork", code: 1,
                       userInfo: [NSLocalizedDescriptionKey: "Architecture version mismatch: saved \(savedArchitectureVersion), current \(PolicyValueNetwork.ARCHITECTURE_VERSION)"])
       }
+
+      // Read dropout rate (default to 0.1 for models saved before this field existed)
+      let savedDropoutRate = (architectureInfo["dropoutRate"] as? NSNumber)?.floatValue ?? DEFAULT_DROPOUT
 
       // Load weights
       let weightsURL = url.appendingPathComponent("weights.json")
@@ -318,7 +332,8 @@ public class PolicyValueNetwork: Module {
          valueHiddenWeight: valueHiddenWeight,
          valueHiddenBias: valueHiddenBias,
          valueOutputWeight: valueOutputWeight,
-         valueOutputBias: valueOutputBias)
+         valueOutputBias: valueOutputBias,
+         dropoutRate: savedDropoutRate)
 
       return (network, metadata)
    }
