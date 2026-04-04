@@ -2,277 +2,218 @@
 
 ## Project Overview
 
-Orion is a Swift-based system for training neural networks to play the card game Splendor. The project uses Apple's MLX framework for on-device machine learning and implements a complete Splendor game engine with a neural network agent architecture.
+Orion is a Swift-based system for training neural networks to play the card game Splendor. It uses Apple's MLX framework for on-device machine learning and implements a complete Splendor game engine with a neural network agent architecture.
 
-**Current Status:** Basic infrastructure complete. Game logic fully implemented with a random agent. Neural network architecture defined but not yet integrated into training pipeline.
+**Current Status:** Full training pipeline operational. Iterative self-play loop with champion gating, hyperparameter sweeps, interactive human-vs-AI play mode. Active work on improving training convergence.
 
 ## Project Structure
 
 ```
 Orion/
 ├── src/
-│   ├── core/              # Core abstractions and protocols
-│   │   ├── GameProtocol.swift      # Generic game interface
-│   │   ├── AgentProtocol.swift     # Generic agent interface
-│   │   └── RandomAgent.swift       # Random baseline agent (DumbAgent)
+│   ├── core/
+│   │   ├── GameProtocol.swift         # Generic game interface + GameTerminalCondition enum
+│   │   ├── AgentProtocol.swift        # Generic agent interface (isHuman property)
+│   │   └── RandomAgent.swift          # Random baseline agent (DumbAgent)
 │   │
-│   ├── splendor/          # Splendor-specific implementation
-│   │   ├── Game.swift              # Complete Splendor game logic
-│   │   ├── Card.swift              # Card definitions and gem types
-│   │   ├── GamePrinter.swift       # Console output formatting
-│   │   └── SplendorNeuralAgent.swift # Neural network agent
+│   ├── splendor/
+│   │   ├── Game.swift                 # Complete Splendor game logic
+│   │   ├── Card.swift                 # Card definitions and gem types
+│   │   ├── GamePrinter.swift          # Console output, interactive UI, probability bars
+│   │   ├── SplendorNeuralAgent.swift  # PolicyValueNetwork + SplendorNeuralAgent
+│   │   └── SplendorTrainingData.swift # Training data structs + binary serialization
 │   │
-│   ├── utility/           # Helper utilities
-│   │   ├── Utility.swift           # PRNG and misc utilities
-│   │   └── OptionParser.swift      # CLI argument parsing
+│   ├── utility/
+│   │   ├── Utility.swift              # PRNG and misc utilities
+│   │   └── OptionParser.swift         # CLI argument parsing
 │   │
-│   └── Orion.swift        # Main executable entry point
+│   ├── Orion.swift                    # Main entry point (dispatches to subcommands)
+│   ├── Common.swift                   # Shared helpers (initializeAgents, sampleMoveWithTemperature)
+│   ├── DataGenerator.swift            # `orion generate` — self-play data collection
+│   ├── NetworkTrainer.swift           # `orion train` — training loop with early stopping
+│   ├── GameplayTester.swift           # `orion play` — evaluation and interactive play
+│   └── HumanAgent.swift              # Human player agent for interactive mode
 │
-├── Package.swift          # Swift package definition
-└── CLAUDE.md             # This file
+├── scripts/
+│   ├── iterative_gameplay.py          # Multi-cycle self-play training orchestrator
+│   └── sweep.sh                       # Hyperparameter sweep harness
+│
+├── Package.swift
+├── build.sh                           # xcodebuild wrapper (required for Metal shaders)
+└── CLAUDE.md
 ```
 
-## Key Components
+## CLI Tools
 
-### 1. Core Protocols (`src/core/`)
+Orion provides three subcommands:
 
-**GameProtocol** - Generic interface for turn-based games:
-- `canonicalMoveCount`: Total number of possible moves
-- `currentTurn`, `currentPlayer`: Game state tracking
-- `legalMoveMaskForCurrentPlayer()`: Returns boolean array of legal moves
-- `applyMove(canonicalMoveIndex:)`: Applies a move to the game state
-- `terminalCondition`: Returns game end state (won/tied/in-progress)
+### `orion generate` — Generate training data
+Plays self-play games and saves training examples.
+- `-n` game count, `-a` agent (path or "random"), `-o` output path
+- `-t` temperature, `-s` seed, `-p` player count, `--max-turns`
+- Output: `.bin.lz4` binary format (LZ4-compressed packed floats)
 
-**AgentProtocol** - Generic interface for game-playing agents:
-- `predict(game:currentPlayerIndex:)`: Returns tuple of (policyLogits, valueEstimate) for all canonical moves
+### `orion train` — Train neural network
+Trains on generated data with Adam optimizer.
+- `-i` input data (file or directory), `-o` output model path
+- `-m` existing model to continue from, `-e` epochs, `-b` batch size
+- `-r` learning rate, `-w` weight decay, `-d` dropout rate
+- `-E` early stopping patience, `--min-policy-weight` (loser weight floor)
+- Policy loss: cross-entropy, value-weighted with configurable min weight
+- Value loss: MSE on [-1, 1] targets
 
-**DumbAgent** (RandomAgent) - Baseline random agent that assigns random preferences to all moves. Uses seeded PRNG for reproducibility.
+### `orion play` — Play and evaluate
+Plays games for evaluation or interactive human play.
+- `-n` game count, `-a` agent specs (one per player or broadcast)
+- `-t` temperature, `--max-turns`, `-v` verbose, `--show-probabilities`
+- Interactive mode: `orion play -a human models/model/` (colored probability bars, card descriptions)
 
-### 2. Splendor Game Implementation (`src/splendor/`)
+## Neural Network Architecture
 
-**Game Logic** (Game.swift):
-- Full implementation of Splendor card game rules
+**PolicyValueNetwork** (`SplendorNeuralAgent.swift`):
+- Input: **361** floats (encoded game state)
+- Shared trunk: 361 → 512 → 512 → 512 (ReLU + dropout, configurable rate, default 0.1)
+- Policy head: 512 → 48 (raw logits, no activation)
+- Value head: 512 → 128 → 1 (ReLU, then tanh for [-1, 1])
+- He initialization, architecture version **3**
+- ~623k parameters
+- Dropout rate stored in architecture.json, configurable via `--dropout`
+
+**Known issue:** Trunk layers (dense1-3) and policy head have no bias terms. Only value head layers have biases.
+
+**Known issue:** Player state encoding is NOT rotated to current player's perspective. Players are always encoded in fixed order with a one-hot for current player. This forces the network to learn redundant mappings for each player slot.
+
+## Game State Encoding (361 Float16 values)
+
+```
+Game State Encoding (361 Float16 values)
+═══════════════════════════════════════════════════════════════════════════
+
+ Index    Field                          Size   Normalization
+───────────────────────────────────────────────────────────────────────────
+ 0-46     Player 0 state                 47     (see player encoding)
+ 47-93    Player 1 state                 47     (see player encoding)
+ 94-140   Player 2 state (or zeros)      47     zero-padded if <3 players
+ 141-187  Player 3 state (or zeros)      47     zero-padded if <4 players
+───────────────────────────────────────────────────────────────────────────
+ 188      supply[red]                    ┐
+ 189      supply[green]                  │  /6
+ 190      supply[blue]                   │
+ 191      supply[white]                  │
+ 192      supply[brown]                  ┘
+ 193      goldGemSupply                  /5
+───────────────────────────────────────────────────────────────────────────
+          ┌─ Noble 0 (or zeros) ───────────────────────────────────┐
+ 194      │  points                                          /3    │
+ 195-199  │  price [red, green, blue, white, brown]          /4    │
+          └────────────────────────────────────────────────────────┘
+          ┌─ Noble 1 (or zeros) ───────────────────────────────────┐
+ 200      │  points                                          /3    │
+ 201-205  │  price [red, green, blue, white, brown]          /4    │
+          └────────────────────────────────────────────────────────┘
+          ... Nobles 2-4 follow same pattern (6 values each) ...
+───────────────────────────────────────────────────────────────────────────
+ 224-355  Visible cards: 3 tiers × 4 positions × 11         132
+          (each card: 1 point/10 + 5 price/10 + 5 color one-hot)
+          Zero-padded for empty positions.
+───────────────────────────────────────────────────────────────────────────
+ 356      currentPlayer[0]               ┐
+ 357      currentPlayer[1]               │  one-hot
+ 358      currentPlayer[2]               │
+ 359      currentPlayer[3]               ┘
+ 360      turnNumber                     /100
+───────────────────────────────────────────────────────────────────────────
+```
+
+```
+Player Encoding (47 Float16 values)
+═══════════════════════════════════════════════════════════════════════════
+
+ Index  Field              Normalization
+─────────────────────────────────────────────────────────────────────────
+  0     gems[red]          ┐
+  1     gems[green]        │  /10
+  2     gems[blue]         │
+  3     gems[white]        │
+  4     gems[brown]        ┘
+  5     goldGems           /10
+─────────────────────────────────────────────────────────────────────────
+  6     cardPower[red]     ┐
+  7     cardPower[green]   │  /7
+  8     cardPower[blue]    │
+  9     cardPower[white]   │
+ 10     cardPower[brown]   ┘
+─────────────────────────────────────────────────────────────────────────
+ 11     reservedCount      /3
+─────────────────────────────────────────────────────────────────────────
+        ┌─ Reserved Card 0 (or zeros) ─────────────────────────────┐
+ 12     │  points                                            /10   │
+ 13-17  │  price [red, green, blue, white, brown]            /10   │
+ 18-22  │  color one-hot [red, green, blue, white, brown]          │
+        └──────────────────────────────────────────────────────────┘
+        ┌─ Reserved Card 1 (or zeros) ─────────────────────────────┐
+ 23     │  points                                            /10   │
+ 24-28  │  price [red, green, blue, white, brown]            /10   │
+ 29-33  │  color one-hot [red, green, blue, white, brown]          │
+        └──────────────────────────────────────────────────────────┘
+        ┌─ Reserved Card 2 (or zeros) ─────────────────────────────┐
+ 34     │  points                                            /10   │
+ 35-39  │  price [red, green, blue, white, brown]            /10   │
+ 40-44  │  color one-hot [red, green, blue, white, brown]          │
+        └──────────────────────────────────────────────────────────┘
+─────────────────────────────────────────────────────────────────────────
+ 45     nobleCount         /5
+ 46     score              /15
+─────────────────────────────────────────────────────────────────────────
+```
+
+## Training Pipeline
+
+### Iterative Self-Play (`scripts/iterative_gameplay.py`)
+Orchestrates the generate → train → evaluate cycle:
+- Cycle 1: Random agent generates initial data
+- Cycles 2+: Current champion generates self-play data
+- Champion gating: new model must beat previous by >52% to be accepted
+- Temperature schedule: linear decay from initial (1.5) to final (0.5)
+- LR decay: geometric per cycle (default 0.95×)
+- Commands logged to `evaluations/commands.log`
+
+Current defaults: 5000 initial games, 5000 games/cycle, 15 cycles, BS=128, LR=3e-4, WD=0.0, dropout=0.1, min-policy-weight=0.5 for self-play cycles (0.0 for cycle 1)
+
+### Training Data Format
+Binary `.bin.lz4` files (LZ4-compressed):
+- 24-byte header: magic "ORIN", version, dimensions, counts
+- Packed examples: [361×f32 state][48×f32 policy][1×f32 value] = 1640 bytes each
+- Legacy `.gz` JSON format still loadable
+
+### Loss Function
+- **Policy loss**: Cross-entropy with value weighting. Winner weight=1.0, loser weight=`minPolicyWeight` (0.0 for random data, 0.5 for self-play). Without this, self-play training causes catastrophic forgetting.
+- **Value loss**: MSE between predicted and actual outcome (±1 for win/loss, 0 for tie)
+- Combined: `policyWeight * policyLoss + valueWeight * valueLoss`
+
+**Note:** When minPolicyWeight=0.0, the reported loss is artificially halved because loser examples contribute 0 to the mean. A reported loss of ~1.3 actually represents ~2.6 cross-entropy on winner examples.
+
+## Splendor Game Rules
+
 - **48 canonical moves**: 12 purchase + 3 purchase-reserved + 10 take-three-gems + 5 take-two-gems + 12 reserve + 6 discard
-- **Two-phase turn system**:
-  - Normal action phase: take gems, buy cards, or reserve cards
-  - Discard phase (if needed): discard gems to get down to 10
-- Victory condition: First to 15 points
-- Supports 2-4 players
-- Tracks: card decks (3 tiers), player states, gem supply, available nobles, current phase
-- Memoized legal move masks for efficiency
-- Game state encoding: 360 Float16 values for neural network input
-
-**Card System** (Card.swift):
-- 5 gem types: red, green, blue, white, brown
-- 90 total cards across 3 tiers (40/30/20 distribution)
-- Each card has: points, price (5-element array), and color
-- Card encoding: 11 Float16 values (1 point + 5 price + 5 color one-hot)
-
-**Player State**:
-- Gems inventory (5 colors + gold)
-- Owned cards and reserved cards (max 3)
-- Acquired nobles (max 3)
-- Score calculation (card points + noble points)
-- Purchase power (permanent gems from cards + temporary gems)
-- Player encoding: 47 Float16 values
-
-**Game Rules Implemented**:
-- Gem taking: 3 different colors OR 2 of same color (requires 4+ in supply)
-- Card purchase: from table or from reserved cards
-- Card reservation: take card + gold gem (max 3 reserved)
-- Noble acquisition: automatic when requirements met (card-based only)
-- **Gem limit enforcement**: Players can take gems that put them over 10, then must discard down to exactly 10
 - **Two-phase turns**: Normal action → Discard phase (if >10 gems) → Next player
-- Win condition: 15+ points
+- **Terminal conditions**: playerWon (15+ points), tied, timedOut, inProgress
+- **Gold gems**: Wildcards for purchasing; correctly deducted from player inventory when spent
+- 2-4 players, 5 gem types + gold, 90 cards across 3 tiers, nobles
 
-### 3. Neural Network Architecture (`src/splendor/SplendorNeuralAgent.swift`)
+## Building
 
-**PolicyValueNetwork**:
-- Input: 360 Float16 (encoded game state)
-- Architecture:
-  - Shared trunk: 360 → 512 → 512 → 256 (ReLU activations)
-  - Policy head: 256 → 48 (raw logits, no activation)
-  - Value head: 256 → 128 → 1 (tanh activation for [-1, 1] range)
-- He initialization for weights
-- Architecture version: 2 (updated for 48-move system)
-
-**SplendorNeuralAgent**:
-- Implements AgentProtocol
-- Uses PolicyValueNetwork for inference
-- `calculateMovePreferences()`: Returns policy logits
-- `predict()`: Returns both policy logits and value estimate
-
-**Model Serialization**:
-- Save/load functionality defined but not fully implemented
-- Stores weights, metadata, and architecture info in JSON format
-- Version checking to ensure compatibility
-
-### 4. Main Executable (`src/Orion.swift`)
-
-Current functionality:
-- Plays multiple games with random agent (DumbAgent)
-- Command-line options:
-  - `-s, --seed`: PRNG seed (default: 42)
-  - `-p, --player-count`: Number of players 2-4 (default: 2)
-  - `-n, --game-count`: Number of games to simulate (default: 1)
-- Outputs: total turns, win counts per player, tie count, win percentages
-- `sampleMove()`: Selects highest-preference legal move (argmax over valid moves)
-
-## Technical Details
-
-### Game State Encoding (360 Float16 values)
-
-1. **Players (188)**: 4 × 47 (zero-padded for missing players)
-   - Per player: gems (5) + gold (1) + card-power (5) + reserved-count (1) + reserved-cards (33) + nobles (1) + score (1)
-
-2. **Supply (5)**: Gem counts for each color
-
-3. **Nobles (30)**: 5 × 6 (points + 5-element price array)
-
-4. **Visible Cards (132)**: 3 tiers × 4 positions × 11 (card encoding)
-
-5. **Current Player (4)**: One-hot encoding
-
-6. **Turn Number (1)**: Normalized by 100
-
-### Dependencies
-
-- **mlx-swift** (v0.10.0+): Apple's MLX framework
-  - MLX: Core array operations
-  - MLXNN: Neural network layers
-  - MLXOptimizers: Training optimizers
-- **Swift 5.9+**
-- **macOS 14+**
-
-## Building and Running
-
-**Important**: MLX Swift requires Metal shader compilation, which `swift build` cannot do. Use the provided build script instead.
+**Important**: MLX requires Metal shader compilation. Use xcodebuild via `build.sh`:
 
 ```bash
-# Build release version (recommended)
-./build.sh release
-
-# Build debug version
-./build.sh debug
-
-# Run with default settings (1 game, 2 players)
-.build/release/orion
-
-# Run multiple games
-.build/release/orion --game-count 100 --player-count 3 --seed 12345
-
-# Debug build (slower but better error messages)
-.build/debug/orion -n 10 -p 4
+./build.sh release    # Required for Metal shaders
+./build.sh debug      # Debug with better error messages
 ```
 
-**Build Output**:
-- Binary: `.build/release/orion` or `.build/debug/orion`
-- MetalLib bundle: `.build/release/mlx-swift_Cmlx.bundle/` (required at runtime)
+`swift build` compiles but the binary will crash at runtime with "Failed to load metallib" unless a metallib from a prior xcodebuild is present.
 
-**Symlinking**: You can symlink the binary anywhere, and it will find the metallib because they're built to the same directory:
-```bash
-ln -s $(pwd)/.build/release/orion ~/bin/orion
-```
+## Dependencies
 
-## Current Limitations / TODOs
-
-### Implemented
-- ✅ Complete Splendor game logic with all rules
-- ✅ Generic game/agent protocol abstractions
-- ✅ Random baseline agent (DumbAgent)
-- ✅ Neural network architecture definition
-- ✅ Game state encoding for neural input
-- ✅ Command-line interface for game simulation
-- ✅ Game statistics collection
-- ✅ Neural network inference working with MLX
-- ✅ Build system with Metal shader compilation
-- ✅ Move type tracking and statistics
-
-### Not Yet Implemented
-- ❌ Training pipeline for neural network
-- ❌ Self-play data collection
-- ❌ Model checkpoint saving/loading (partially implemented)
-- ❌ Gradient computation and backpropagation
-- ❌ Experience replay buffer
-- ❌ Policy and value loss calculation
-- ❌ Integration of SplendorNeuralAgent into main game loop
-- ❌ Evaluation framework (neural vs random, neural vs neural)
-- ❌ Hyperparameter configuration system
-- ❌ Training metrics and logging
-- ❌ Model versioning and experiment tracking
-
-## Architecture Notes
-
-### Design Decisions
-
-1. **Generic Protocols**: GameProtocol and AgentProtocol allow for multiple game implementations and agent types. Future work could add other games (Chess, Go, etc.).
-
-2. **Canonical Move Ordering**: All possible moves are pre-enumerated in a fixed order. Agents output preferences for all moves, and illegal moves are masked out. This simplifies neural network output.
-
-3. **Float16 Encoding**: Game state uses Float16 for memory efficiency and potential hardware acceleration benefits.
-
-4. **Move Sampling**: Currently uses argmax selection. Could be extended with temperature-based sampling or epsilon-greedy exploration.
-
-5. **Memoized Legal Moves**: Legal move masks are precomputed and updated only when game state changes, avoiding repeated computation.
-
-6. **Immutable Game Logic**: Game state modifications are explicit through `mutating func applyMove()`, making state transitions clear.
-
-### Neural Network Design Rationale
-
-- **Two-headed architecture**: Policy head for move selection, value head for position evaluation (standard in AlphaZero-style agents)
-- **Shared trunk**: Features useful for both move selection and position evaluation are learned together
-- **No softmax on policy**: Outputs raw logits; softmax applied during training with legal move masking
-- **Tanh on value**: Constrains value estimates to [-1, 1] range (loss = -1, tie = 0, win = 1)
-
-## Next Steps for Training
-
-1. Implement self-play loop:
-   - Play games using current neural network
-   - Store (state, policy, outcome) tuples
-
-2. Create training pipeline:
-   - Sample batches from replay buffer
-   - Compute policy loss (cross-entropy) and value loss (MSE)
-   - Backpropagate and update weights
-
-3. Add evaluation:
-   - Periodically test new model vs old model
-   - Only keep new model if it wins >55% of games
-
-4. Add monitoring:
-   - Track loss curves
-   - Monitor move diversity
-   - Log win rates over time
-
-## Game Rules Reference
-
-For full Splendor rules, see: https://www.spacecowboys.fr/splendor
-
-Key simplifications in this implementation:
-- Simplified noble acquisition (automatic)
-- Standard card distribution (no expansions)
-- No explicit discard phase (gem limit enforced during taking)
-
-## Development Notes
-
-- Use `--seed` for reproducible random agent behavior during debugging
-- Enable silence mode (automatic when game-count > 1) to avoid verbose output
-- DumbAgent is useful for baseline performance measurement (~80 turns per game)
-- All game state mutations go through `applyMove()` with precondition checks
-
-### Untrained Neural Network Behavior
-
-The neural network currently uses random He-initialized weights (untrained). This causes:
-- **Highly variable game lengths**: 20-400+ turns depending on random seed
-- **Pass move bias**: Some game states cause the network to heavily prefer "pass" moves (move index 42)
-- **Normal for untrained networks**: This behavior will disappear once training begins
-
-Example statistics from untrained network:
-- Seed 1: 403 turns (85.9% passes)
-- Seed 2: 62 turns (6.5% passes)
-- Average: ~60-80 turns when not pass-heavy
-
-Once trained, expect:
-- Consistent game lengths (similar to DumbAgent: ~80 turns)
-- Strategic move selection
-- Minimal pass moves
+- **mlx-swift** (v0.10.0+): MLX, MLXNN, MLXOptimizers
+- **Swift 5.9+**, **macOS 14+**
+- **Python 3** with `docopt` (for iterative_gameplay.py)
