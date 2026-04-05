@@ -33,13 +33,13 @@ public struct ModelMetadata: Codable {
 ///   Input (361) -> Dense(512) -> Dense(512) -> Dense(256) -> Policy Head (48) + Value Head (1)
 public class PolicyValueNetwork: Module {
 
-   public static let INPUT_DIMENSIONS = 361 // Matches game's state embedding size (updated for gold gem supply)
+   public static let INPUT_DIMENSIONS = 357 // Matches game's state embedding size (rotated players, no current-player one-hot)
    public static let POLICY_DIMENSIONS = 48 // Matches game's move space (42 normal + 6 discard)
    public static let HIDDEN_DIMENSIONS = 512
    public static let DEFAULT_DROPOUT: Float = 0.1
 
    // Current architecture version - increment when architecture changes
-   public static let ARCHITECTURE_VERSION = 3
+   public static let ARCHITECTURE_VERSION = 4
 
    // Shared trunk layers
    let dense1: Linear
@@ -77,22 +77,26 @@ public class PolicyValueNetwork: Module {
          keys = Array(repeating: MLXArray(0), count: 6) // Dummy keys, will use nil
       }
 
-      // Shared trunk: 360 -> 512 -> 512 -> 256
+      // Shared trunk: 361 -> 512 -> 512 -> 512
       self.dense1 = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.INPUT_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[0]))
+         inputDimensions: PolicyValueNetwork.INPUT_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[0]),
+         bias: MLXArray.zeros([PolicyValueNetwork.HIDDEN_DIMENSIONS]))
       self.dense2 = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[1]))
+         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[1]),
+         bias: MLXArray.zeros([PolicyValueNetwork.HIDDEN_DIMENSIONS]))
       self.dense3 = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[2]))
+         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[2]),
+         bias: MLXArray.zeros([PolicyValueNetwork.HIDDEN_DIMENSIONS]))
 
       // Dropout layers
       self.dropout1 = Dropout(p: dropoutRate)
       self.dropout2 = Dropout(p: dropoutRate)
       self.dropout3 = Dropout(p: dropoutRate)
 
-      // Policy head: 256 -> 48 logits
+      // Policy head: 512 -> 48 logits
       self.policyHead = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.POLICY_DIMENSIONS, key: seed == nil ? nil : keys[3]))
+         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.POLICY_DIMENSIONS, key: seed == nil ? nil : keys[3]),
+         bias: MLXArray.zeros([PolicyValueNetwork.POLICY_DIMENSIONS]))
 
       // Value head: 256 -> 128 -> 1
       self.valueHidden = Linear(weight: PolicyValueNetwork.heInitialization(
@@ -105,19 +109,21 @@ public class PolicyValueNetwork: Module {
 
    /// Private initializer that takes weights directly (for cloning and loading)
    private init (
-      dense1Weight: MLXArray, dense2Weight: MLXArray, dense3Weight: MLXArray,
-      policyHeadWeight: MLXArray,
+      dense1Weight: MLXArray, dense1Bias: MLXArray,
+      dense2Weight: MLXArray, dense2Bias: MLXArray,
+      dense3Weight: MLXArray, dense3Bias: MLXArray,
+      policyHeadWeight: MLXArray, policyHeadBias: MLXArray,
       valueHiddenWeight: MLXArray, valueHiddenBias: MLXArray,
       valueOutputWeight: MLXArray, valueOutputBias: MLXArray,
       dropoutRate: Float = DEFAULT_DROPOUT) {
       self.dropoutRate = dropoutRate
-      self.dense1 = Linear(weight: dense1Weight)
-      self.dense2 = Linear(weight: dense2Weight)
-      self.dense3 = Linear(weight: dense3Weight)
+      self.dense1 = Linear(weight: dense1Weight, bias: dense1Bias)
+      self.dense2 = Linear(weight: dense2Weight, bias: dense2Bias)
+      self.dense3 = Linear(weight: dense3Weight, bias: dense3Bias)
       self.dropout1 = Dropout(p: dropoutRate)
       self.dropout2 = Dropout(p: dropoutRate)
       self.dropout3 = Dropout(p: dropoutRate)
-      self.policyHead = Linear(weight: policyHeadWeight)
+      self.policyHead = Linear(weight: policyHeadWeight, bias: policyHeadBias)
       self.valueHidden = Linear(weight: valueHiddenWeight, bias: valueHiddenBias)
       self.valueOutput = Linear(weight: valueOutputWeight, bias: valueOutputBias)
       super.init()
@@ -141,11 +147,15 @@ public class PolicyValueNetwork: Module {
          paramDict[key] = array
       }
 
-      // Extract weights for each layer (MLXArray operations create new arrays, so this is a copy)
+      // Extract weights and biases for each layer
       let dense1Weight = paramDict["dense1.weight"]!
+      let dense1Bias = paramDict["dense1.bias"]!
       let dense2Weight = paramDict["dense2.weight"]!
+      let dense2Bias = paramDict["dense2.bias"]!
       let dense3Weight = paramDict["dense3.weight"]!
+      let dense3Bias = paramDict["dense3.bias"]!
       let policyHeadWeight = paramDict["policyHead.weight"]!
+      let policyHeadBias = paramDict["policyHead.bias"]!
       let valueHiddenWeight = paramDict["valueHidden.weight"]!
       let valueHiddenBias = paramDict["valueHidden.bias"]!
       let valueOutputWeight = paramDict["valueOutput.weight"]!
@@ -153,14 +163,12 @@ public class PolicyValueNetwork: Module {
 
       // Create new network with copied weights
       return PolicyValueNetwork(
-         dense1Weight: dense1Weight,
-         dense2Weight: dense2Weight,
-         dense3Weight: dense3Weight,
-         policyHeadWeight: policyHeadWeight,
-         valueHiddenWeight: valueHiddenWeight,
-         valueHiddenBias: valueHiddenBias,
-         valueOutputWeight: valueOutputWeight,
-         valueOutputBias: valueOutputBias,
+         dense1Weight: dense1Weight, dense1Bias: dense1Bias,
+         dense2Weight: dense2Weight, dense2Bias: dense2Bias,
+         dense3Weight: dense3Weight, dense3Bias: dense3Bias,
+         policyHeadWeight: policyHeadWeight, policyHeadBias: policyHeadBias,
+         valueHiddenWeight: valueHiddenWeight, valueHiddenBias: valueHiddenBias,
+         valueOutputWeight: valueOutputWeight, valueOutputBias: valueOutputBias,
          dropoutRate: self.dropoutRate)
    }
 
@@ -313,11 +321,15 @@ public class PolicyValueNetwork: Module {
          return MLXArray(floatArray).reshaped(shape)
       }
 
-      // Load all weights from the dictionary
+      // Load all weights and biases from the dictionary
       let dense1Weight = try loadArray(key: "dense1.weight")
+      let dense1Bias = try loadArray(key: "dense1.bias")
       let dense2Weight = try loadArray(key: "dense2.weight")
+      let dense2Bias = try loadArray(key: "dense2.bias")
       let dense3Weight = try loadArray(key: "dense3.weight")
+      let dense3Bias = try loadArray(key: "dense3.bias")
       let policyHeadWeight = try loadArray(key: "policyHead.weight")
+      let policyHeadBias = try loadArray(key: "policyHead.bias")
       let valueHiddenWeight = try loadArray(key: "valueHidden.weight")
       let valueHiddenBias = try loadArray(key: "valueHidden.bias")
       let valueOutputWeight = try loadArray(key: "valueOutput.weight")
@@ -325,14 +337,12 @@ public class PolicyValueNetwork: Module {
 
       // Create network with loaded weights using the private initializer
       let network = PolicyValueNetwork(
-         dense1Weight: dense1Weight,
-         dense2Weight: dense2Weight,
-         dense3Weight: dense3Weight,
-         policyHeadWeight: policyHeadWeight,
-         valueHiddenWeight: valueHiddenWeight,
-         valueHiddenBias: valueHiddenBias,
-         valueOutputWeight: valueOutputWeight,
-         valueOutputBias: valueOutputBias,
+         dense1Weight: dense1Weight, dense1Bias: dense1Bias,
+         dense2Weight: dense2Weight, dense2Bias: dense2Bias,
+         dense3Weight: dense3Weight, dense3Bias: dense3Bias,
+         policyHeadWeight: policyHeadWeight, policyHeadBias: policyHeadBias,
+         valueHiddenWeight: valueHiddenWeight, valueHiddenBias: valueHiddenBias,
+         valueOutputWeight: valueOutputWeight, valueOutputBias: valueOutputBias,
          dropoutRate: savedDropoutRate)
 
       return (network, metadata)

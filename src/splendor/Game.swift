@@ -505,14 +505,16 @@ public struct Game: GameProtocol {
 
    // Encode game state as a fixed-size array of Float16
    // Size: 188 (4 players × 47) + 5 (supply) + 1 (gold supply) + 30 (5 nobles × 6) + 132 (3 tiers × 4 cards × 11) + 4 (current player one-hot) + 1 (turn) = 361
-   public static let GAME_STATE_ENCODING_SIZE = 361
+   public static let GAME_STATE_ENCODING_SIZE = 357
 
    public func encoding () -> [Float16] {
       var encoded: [Float16] = []
 
-      // 4 players × 167 floats each (zero-padded if player not present)
-      for i in 0..<4 {
-         if i < self.players.count {
+      // 4 players × 47 floats each (rotated so current player is always at index 0)
+      let n = self.players.count
+      for slot in 0..<4 {
+         let i = (self.currentPlayer + slot) % n
+         if slot < n {
             encoded.append(contentsOf: self.players[i].encoding())
          } else {
             // Zero-padding for missing players
@@ -551,13 +553,6 @@ public struct Game: GameProtocol {
             }
          }
       }
-
-      // 4 current player one-hot encoding
-      var currentPlayerOneHot = Array(repeating: Float16(0), count: 4)
-      if self.currentPlayer < 4 {
-         currentPlayerOneHot[self.currentPlayer] = 1.0
-      }
-      encoded.append(contentsOf: currentPlayerOneHot)
 
       // 1 current turn (normalized, assuming max 100 turns)
       encoded.append(Float16(self.currentTurn) / 100.0)

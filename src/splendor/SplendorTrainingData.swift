@@ -93,7 +93,7 @@ public struct TrainingDataset: Codable {
    /// Magic bytes to identify binary training data files
    private static let MAGIC: UInt32 = 0x4F52494E  // "ORIN"
    private static let FORMAT_VERSION: UInt32 = 1
-   private static let STATE_DIM: Int = 361
+   private static let STATE_DIM: Int = 357
    private static let POLICY_DIM: Int = 48
    /// Bytes per example: (360 + 48 + 1) * 4 = 1636
    private static let BYTES_PER_EXAMPLE: Int = (STATE_DIM + POLICY_DIM + 1) * MemoryLayout<Float>.size

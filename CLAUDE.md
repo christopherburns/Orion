@@ -71,30 +71,29 @@ Plays games for evaluation or interactive human play.
 ## Neural Network Architecture
 
 **PolicyValueNetwork** (`SplendorNeuralAgent.swift`):
-- Input: **361** floats (encoded game state)
-- Shared trunk: 361 → 512 → 512 → 512 (ReLU + dropout, configurable rate, default 0.1)
+- Input: **357** floats (encoded game state)
+- Shared trunk: 357 → 512 → 512 → 512 (ReLU + dropout, configurable rate, default 0.1)
 - Policy head: 512 → 48 (raw logits, no activation)
 - Value head: 512 → 128 → 1 (ReLU, then tanh for [-1, 1])
-- He initialization, architecture version **3**
-- ~623k parameters
+- He initialization, architecture version **4**
+- ~622k parameters
 - Dropout rate stored in architecture.json, configurable via `--dropout`
 
-**Known issue:** Trunk layers (dense1-3) and policy head have no bias terms. Only value head layers have biases.
-
-**Known issue:** Player state encoding is NOT rotated to current player's perspective. Players are always encoded in fixed order with a one-hot for current player. This forces the network to learn redundant mappings for each player slot.
-
-## Game State Encoding (361 Float16 values)
+## Game State Encoding (357 Float16 values)
 
 ```
-Game State Encoding (361 Float16 values)
+Game State Encoding (357 Float16 values)
 ═══════════════════════════════════════════════════════════════════════════
 
  Index    Field                          Size   Normalization
 ───────────────────────────────────────────────────────────────────────────
- 0-46     Player 0 state                 47     (see player encoding)
- 47-93    Player 1 state                 47     (see player encoding)
- 94-140   Player 2 state (or zeros)      47     zero-padded if <3 players
- 141-187  Player 3 state (or zeros)      47     zero-padded if <4 players
+ 0-46     Current player state           47     (see player encoding)
+ 47-93    Next player state              47     (see player encoding)
+ 94-140   Player +2 state (or zeros)     47     zero-padded if <3 players
+ 141-187  Player +3 state (or zeros)     47     zero-padded if <4 players
+
+          Players rotated so slot 0 is always the player to move next.
+          No explicit current-player encoding needed.
 ───────────────────────────────────────────────────────────────────────────
  188      supply[red]                    ┐
  189      supply[green]                  │  /6
@@ -117,11 +116,7 @@ Game State Encoding (361 Float16 values)
           (each card: 1 point/10 + 5 price/10 + 5 color one-hot)
           Zero-padded for empty positions.
 ───────────────────────────────────────────────────────────────────────────
- 356      currentPlayer[0]               ┐
- 357      currentPlayer[1]               │  one-hot
- 358      currentPlayer[2]               │
- 359      currentPlayer[3]               ┘
- 360      turnNumber                     /100
+ 356      turnNumber                     /100
 ───────────────────────────────────────────────────────────────────────────
 ```
 
@@ -183,7 +178,7 @@ Current defaults: 5000 initial games, 5000 games/cycle, 15 cycles, BS=128, LR=3e
 ### Training Data Format
 Binary `.bin.lz4` files (LZ4-compressed):
 - 24-byte header: magic "ORIN", version, dimensions, counts
-- Packed examples: [361×f32 state][48×f32 policy][1×f32 value] = 1640 bytes each
+- Packed examples: [357×f32 state][48×f32 policy][1×f32 value] = 1624 bytes each
 - Legacy `.gz` JSON format still loadable
 
 ### Loss Function
