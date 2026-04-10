@@ -11,16 +11,18 @@ Options:
    --batch-size N          Training batch size                                     [default: 128]
    --cycles N              Total number of cycles to run                           [default: 15]
    --eval-games N          Games to play when evaluating                           [default: 500]
-   --champion-threshold N  Min win rate vs previous to accept new model (0=off)   [default: 0.52]
+   --champion-threshold N  Min win rate vs previous to accept new model (0=off)    [default: 0.52]
    --early-stopping N      Stop training after N epochs w/out improvement (0=off)  [default: 10]
    --initial-temp TEMP     Sampling temperature for cycle 1                        [default: 1.5]
    --final-temp TEMP       Sampling temperature for the last cycle                 [default: 0.5]
    --learning-rate R       Learning rate for cycle 1                               [default: 0.0003]
-   --lr-decay R            Multiplicative LR decay per cycle (1.0 = no decay)     [default: 0.95]
+   --lr-decay R            Multiplicative LR decay per cycle (1.0 = no decay)      [default: 0.95]
    --weight-decay N        Weight decay rate                                       [default: 0.0]
    --eval-temp TEMP        Sampling temperature during evaluation (0=greedy)       [default: 0]
    --min-policy-weight N   Min policy weight for losers (0=ignore, 1=equal)        [default: 0.5]
-   --dropout N             Dropout rate for trunk layers (0=disabled)               [default: 0.1]
+   --dropout N             Dropout rate for trunk layers (0=disabled)              [default: 0.1]
+   --monte-carlo-samples N MCTS monteCarloSamples per move (0=disabled)            [default: 25]
+   --c-puct N              MCTS exploration constant                               [default: 1.5]
    --accumulate-data       Train on all previous cycles' data, not just the latest
    --data-dir DIR          Directory for generated training data                   [default: trainingdata]
    --model-dir DIR         Directory for saved models                              [default: models]
@@ -55,27 +57,29 @@ from docopt import docopt
 
 @dataclass
 class Config:
-   initialGames:    int   = 5000
-   gamesPerCycle:   int   = 5000
-   epochs:          int   = 100
-   batchSize:       int   = 128
-   maxCycles:       int   = 15
-   evalGames:        int   = 500
-   championThreshold: float = 0.52  # min win rate vs previous to accept new model (0 = disabled)
-   earlyStopping:    int   = 10   # epochs without improvement before stopping (0 = disabled)
-   initialTemp:     float = 1.5
-   finalTemp:       float = 0.5
-   learningRate:    float = 0.0003
-   lrDecay:         float = 0.95
-   weightDecay:     float = 0.0
-   evalTemp:        float = 0
-   minPolicyWeight: float = 0.5   # min policy weight for losers (0=ignore losers, 1=equal weight)
-   dropout:         float = 0.1   # dropout rate for trunk layers (0=disabled)
-   accumulateData:  bool  = False
-   dataDir:         str   = "trainingdata"
-   modelDir:        str   = "models"
-   evalDir:         str   = "evaluations"
-   binary:          str   = ".build/release/orion"
+   initialGames:      int
+   gamesPerCycle:     int
+   epochs:            int
+   batchSize:         int
+   maxCycles:         int
+   evalGames:         int
+   championThreshold: float
+   earlyStopping:     int
+   initialTemp:       float
+   finalTemp:         float
+   learningRate:      float
+   lrDecay:           float
+   weightDecay:       float
+   evalTemp:          float
+   minPolicyWeight:   float
+   dropout:           float
+   monteCarloSamples: int
+   cPuct:             float
+   accumulateData:    bool
+   dataDir:           str
+   modelDir:          str
+   evalDir:           str
+   binary:            str
 
 
 # ── Shell helpers ──────────────────────────────────────────────────────────────
@@ -113,17 +117,20 @@ def generateData (cfg: Config, outputPath: str, agent: str, temperature: float) 
       "-a", agent,
       "-t", f"{temperature:.2f}",
    ]
+   if cfg.monteCarloSamples > 0:
+      args += ["--monte-carlo-samples", str(cfg.monteCarloSamples), "--c-puct", str(cfg.cPuct)]
    return run(args, "generate") == 0
 
 
 def generateInitialData (cfg: Config, outputPath: str) -> bool:
    """Play the first batch of games using the random agent.
-   Policy target temperature is always 0 (one-hot) since random agent logits are noise."""
+   MCTS is not used for cycle 1 — the random agent has no value head."""
    args = [
       cfg.binary, "generate",
       "-o", outputPath,
       "-n", str(cfg.initialGames),
       "-a", "random",
+      "--monte-carlo-samples", str(cfg.monteCarloSamples),
       "-t", f"{cfg.initialTemp:.2f}",
    ]
    return run(args, "generate-initial") == 0
@@ -291,27 +298,29 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> str:
 
 def configFromArgs (args: dict) -> Config:
    return Config(
-      initialGames  = int(args["--initial-games"]),
-      gamesPerCycle = int(args["--games-per-cycle"]),
-      epochs        = int(args["--epochs"]),
-      batchSize     = int(args["--batch-size"]),
-      maxCycles     = int(args["--cycles"]),
+      initialGames       = int(args["--initial-games"]),
+      gamesPerCycle      = int(args["--games-per-cycle"]),
+      epochs             = int(args["--epochs"]),
+      batchSize          = int(args["--batch-size"]),
+      maxCycles          = int(args["--cycles"]),
       evalGames          = int(args["--eval-games"]),
       championThreshold  = float(args["--champion-threshold"]),
       earlyStopping      = int(args["--early-stopping"]),
-      initialTemp   = float(args["--initial-temp"]),
-      finalTemp     = float(args["--final-temp"]),
-      learningRate  = float(args["--learning-rate"]),
-      lrDecay       = float(args["--lr-decay"]),
-      weightDecay   = float(args["--weight-decay"]),
-      evalTemp      = float(args["--eval-temp"]),
-      minPolicyWeight = float(args["--min-policy-weight"]),
-      dropout       = float(args["--dropout"]),
-      accumulateData = bool(args["--accumulate-data"]),
-      dataDir       = args["--data-dir"],
-      modelDir      = args["--model-dir"],
-      evalDir       = args["--eval-dir"],
-      binary        = args["--binary"],
+      initialTemp        = float(args["--initial-temp"]),
+      finalTemp          = float(args["--final-temp"]),
+      learningRate       = float(args["--learning-rate"]),
+      lrDecay            = float(args["--lr-decay"]),
+      weightDecay        = float(args["--weight-decay"]),
+      evalTemp           = float(args["--eval-temp"]),
+      minPolicyWeight    = float(args["--min-policy-weight"]),
+      dropout            = float(args["--dropout"]),
+      monteCarloSamples  = int(args["--monte-carlo-samples"]),
+      cPuct              = float(args["--c-puct"]),
+      accumulateData     = bool(args["--accumulate-data"]),
+      dataDir            = args["--data-dir"],
+      modelDir           = args["--model-dir"],
+      evalDir            = args["--eval-dir"],
+      binary             = args["--binary"],
    )
 
 
@@ -323,7 +332,7 @@ def main ():
    os.makedirs(cfg.modelDir, exist_ok=True)
    os.makedirs(cfg.evalDir,  exist_ok=True)
 
-   _command_log = os.path.join(cfg.evalDir, "commands.log")
+   _command_log = "log.txt"
    with open(_command_log, "w") as f:
       f.write(f"# Orion training run — {__import__('datetime').datetime.now().isoformat()}\n")
 

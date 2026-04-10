@@ -149,6 +149,9 @@ public struct DataGenerator {
       opts.addOption("Data Generator", "s", "seed", "Random seed for game generation (default: random)")
       opts.addOption("Data Generator", "t", "temperature", "Sampling temperature for move selection (default: 1.0, higher = more exploration)")
       opts.addOption("Data Generator", "", "max-turns", "Maximum turns per game before timeout (default: 1000)")
+      opts.addOption("Data Generator", "", "monte-carlo-samples", "MCTS simulations per move (default: 0 = disabled, requires neural agent)")
+      opts.addOption("Data Generator", "", "c-puct", "MCTS exploration constant (default: 1.5)")
+      opts.addOption("Data Generator", "", "mcts-debug", "Print MCTS search tree and π after every move (very verbose, for debugging)", requireArgument: false)
    }
 
 
@@ -167,7 +170,8 @@ public struct DataGenerator {
       temperature: Float,
       seed: UInt64,
       maxTurns: Int,
-      gameIndex: Int) -> GameData? {
+      gameIndex: Int,
+      mctsSearch: MCTSSearch? = nil) -> GameData? {
 
       guard var game = Splendor.Game(playerCount: playerCount, seed: seed) else {
          print("Error: Failed to create game state")
@@ -188,28 +192,57 @@ public struct DataGenerator {
 
          let validMoveMask = game.legalMoveMaskForCurrentPlayer()
          let currentPlayer = game.currentPlayer
-         let (policyLogits, _) = agent.predict(game: game, currentPlayerIndex: currentPlayer)
 
-         // Sample move with temperature
-         guard let (moveIndex, _) = sampleMoveWithTemperature(
-            logits: policyLogits,
-            validMoveMask: validMoveMask,
-            temperature: temperature,
-            rng: &rng
-         ) else {
-            print("Error: No valid moves available for player \(currentPlayer) in game \(gameIndex)")
-            return nil
+         // Determine policy target and move index.
+         // With MCTS: run search, get visit-count distribution, sample from it.
+         // Without MCTS: sample directly from network policy logits (or random).
+         let policyTarget: [Float]
+         let moveIndex: Int
+
+         if let mcts = mctsSearch {
+            // MCTS returns a full distribution — this becomes the policy training target
+            let mctsPolicy = mcts.search(game: game, temperature: temperature)
+            policyTarget = mctsPolicy
+
+            // Sample the actual move from the MCTS distribution
+            var cumulative: Float = 0.0
+            let threshold = Float.random(in: 0.0..<1.0, using: &rng)
+            var selected = -1
+            for i in 0..<mctsPolicy.count {
+               cumulative += mctsPolicy[i]
+               if cumulative > threshold {
+                  selected = i
+                  break
+               }
+            }
+            // Fallback: pick highest-probability move (handles floating-point edge cases)
+            if selected < 0 {
+               selected = mctsPolicy.indices.max(by: { mctsPolicy[$0] < mctsPolicy[$1] }) ?? 0
+            }
+            moveIndex = selected
+         } else {
+            let (policyLogits, _) = agent.predict(game: game, currentPlayerIndex: currentPlayer)
+            guard let (sampledMove, _) = sampleMoveWithTemperature(
+               logits: policyLogits,
+               validMoveMask: validMoveMask,
+               temperature: temperature,
+               rng: &rng
+            ) else {
+               print("Error: No valid moves available for player \(currentPlayer) in game \(gameIndex)")
+               return nil
+            }
+            moveIndex = sampledMove
+            var oneHot = Array(repeating: Float(0.0), count: Splendor.Game.CANONICAL_MOVE_COUNT)
+            oneHot[moveIndex] = 1.0
+            policyTarget = oneHot
          }
-
-         var oneHot = Array(repeating: Float(0.0), count: Splendor.Game.CANONICAL_MOVE_COUNT)
-         oneHot[moveIndex] = 1.0
 
          let stateEncoding = game.encoding().map { Float($0) }
          let example = TrainingExample(
             turnNumber: turnCount,
             playerIndex: currentPlayer,
             state: stateEncoding,
-            policy: oneHot,
+            policy: policyTarget,
             value: 0.0  // Placeholder, will be updated after game ends
          )
          examples.append(example)
@@ -266,7 +299,10 @@ public struct DataGenerator {
       temperature: Float,
       seed: UInt64,
       maxTurns: Int,
-      outputPath: String) throws {
+      outputPath: String,
+      monteCarloSamples: Int = 0,
+      cPuct: Float = 1.5,
+      mctsDebug: Bool = false) throws {
 
       print("Configuration:")
       print("  Games:            \(gameCount)")
@@ -275,11 +311,27 @@ public struct DataGenerator {
       print("  Temperature:      \(String(format: "%.2f", temperature))")
       print("  Max turns:        \(maxTurns)")
       print("  Seed:             \(seed)")
+      print("  MCTS Samples:     \(monteCarloSamples)")
       print("  Output:           \(outputPath)")
+      if monteCarloSamples > 0 {
+         print("  MCTS sims/move:   \(monteCarloSamples)  (c_puct=\(cPuct))")
+      }
 
       // Initialize agent for self-play
       let agents = initializeAgents(playerCount: 1, agentSpecs: [agentSpec], seed: seed)
       let agent = agents[0]
+
+      // Build MCTS search if requested and agent is neural
+      let mctsSearch: MCTSSearch?
+      if monteCarloSamples > 0, let neuralAgent = agent as? SplendorNeuralAgent {
+         mctsSearch = neuralAgent.makeMCTSSearch(monteCarloSamples: monteCarloSamples, cPuct: cPuct, debug: mctsDebug)
+         print("  MCTS enabled with \(monteCarloSamples) samples per move")
+      } else {
+         mctsSearch = nil
+         if monteCarloSamples > 0 {
+            print("  Warning: --monte-carlo-samples ignored (MCTS requires a neural agent)")
+         }
+      }
 
       // Generate games and collect training data
       var allGameData: [GameData] = []
@@ -298,7 +350,8 @@ public struct DataGenerator {
             temperature: temperature,
             seed: gameSeed,
             maxTurns: maxTurns,
-            gameIndex: gameIndex) {
+            gameIndex: gameIndex,
+            mctsSearch: mctsSearch) {
 
             allGameData.append(gameData)
             successfulGames += 1
@@ -368,6 +421,10 @@ public struct DataGenerator {
       let outputPath = outputURL.deletingPathExtension().path
 
       let agentSpec = opts.get(option: "agent", orElse: "random")
+      let monteCarloSamples = opts.get(option: "monte-carlo-samples", orElse: 0)
+      let cPuct = opts.get(option: "c-puct", orElse: Float(1.5))
+      let mctsDebug = opts.wasProvided(option: "mcts-debug")
+
       try generateTrainingData(
          gameCount: gameCount,
          playerCount: playerCount,
@@ -375,7 +432,10 @@ public struct DataGenerator {
          temperature: temperature,
          seed: baseSeed,
          maxTurns: maxTurns,
-         outputPath: outputPath
+         outputPath: outputPath,
+         monteCarloSamples: monteCarloSamples,
+         cPuct: cPuct,
+         mctsDebug: mctsDebug
       )
    }
 }

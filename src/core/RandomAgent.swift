@@ -15,7 +15,9 @@ public class DumbAgent: AgentProtocol {
          return Float(randomUInt) / Float(UInt64.max)
       }
 
-      let valueEstimate: Float = 0.0 // No opinion on the value of this board position
+      // Flip a coin to decide win/loss
+      let valueEstimate: Float = Float(prng.next()) / Float(UInt64.max) > 0.5 ? 1.0 : 0.0 
+      
       return (policyLogits, valueEstimate)
    }
 }

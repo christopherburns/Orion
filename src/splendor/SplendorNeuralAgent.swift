@@ -377,6 +377,11 @@ public class SplendorNeuralAgent: AgentProtocol {
    ///   - currentPlayerIndex: The index of the player whose turn it is
    /// - Returns: Tuple of (policyLogits, valueEstimate) where policyLogits is an
    ///   array of probabilities, one for each canonical move, and valueEstimate is a float between -1 and 1
+   /// Create an MCTSSearch backed by this agent's network.
+   public func makeMCTSSearch (monteCarloSamples: Int, cPuct: Float, debug: Bool = false) -> MCTSSearch {
+      MCTSSearch(network: network, monteCarloSamples: monteCarloSamples, cPuct: cPuct, debug: debug)
+   }
+
    public func predict (game: any GameProtocol, currentPlayerIndex: Int) -> (policyLogits: [Float], valueEstimate: Float) {
       // Cast to Splendor.Game to access the encoding() method
       guard let splendorGame = game as? Splendor.Game else {
