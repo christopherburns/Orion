@@ -131,6 +131,18 @@ struct MoveStatistics {
    }
 }
 
+/// State for one concurrent game lane during batched MCTS data generation.
+private struct GameLane {
+   var game: Splendor.Game
+   var mctsRoot: MCTSNode
+   var rng: SeededRandomNumberGenerator
+   var examples: [TrainingExample]
+   var moves: [(playerIndex: Int, moveIndex: Int)]
+   var turnCount: Int
+   var gameIndex: Int
+   var active: Bool
+}
+
 public struct DataGenerator {
 
    static func registerOptions (opts: OptionParser) {
@@ -151,6 +163,7 @@ public struct DataGenerator {
       opts.addOption("Data Generator", "", "max-turns", "Maximum turns per game before timeout (default: 1000)")
       opts.addOption("Data Generator", "", "monte-carlo-samples", "MCTS simulations per move (default: 0 = disabled, requires neural agent)")
       opts.addOption("Data Generator", "", "c-puct", "MCTS exploration constant (default: 1.5)")
+      opts.addOption("Data Generator", "b", "batch-size", "Number of games to run in parallel during MCTS generation (default: 128)")
       opts.addOption("Data Generator", "", "mcts-debug", "Print MCTS search tree and π after every move (very verbose, for debugging)", requireArgument: false)
    }
 
@@ -291,6 +304,153 @@ public struct DataGenerator {
          moves: moves)
    }
 
+   /// Sample a move index from a policy distribution using CDF sampling.
+   private static func sampleMove (from policy: [Float], rng: inout SeededRandomNumberGenerator) -> Int {
+      let threshold = Float.random(in: 0.0..<1.0, using: &rng)
+      var cumulative: Float = 0.0
+      for i in 0..<policy.count {
+         cumulative += policy[i]
+         if cumulative > threshold { return i }
+      }
+      return policy.indices.max(by: { policy[$0] < policy[$1] }) ?? 0
+   }
+
+   /// Run batched MCTS data generation with `laneCount` games in parallel.
+   /// Each simulation round issues one batched network call for all active lanes.
+   private static func batchedGenerateGames (
+      mctsSearch: MCTSSearch,
+      gameCount: Int,
+      playerCount: Int,
+      temperature: Float,
+      maxTurns: Int,
+      baseSeed: UInt64,
+      laneCount: Int
+   ) -> (games: [GameData], statistics: MoveStatistics) {
+
+      let actualLanes = min(laneCount, gameCount)
+      var nextGameIndex = actualLanes
+      var completedGames: [GameData] = []
+      var statistics = MoveStatistics()
+
+      func initLane (_ gameIndex: Int) -> GameLane? {
+         let seed = baseSeed + UInt64(gameIndex)
+         guard let game = Splendor.Game(playerCount: playerCount, seed: seed) else { return nil }
+         return GameLane(
+            game: game,
+            mctsRoot: MCTSNode(),
+            rng: SeededRandomNumberGenerator(seed: seed),
+            examples: [],
+            moves: [],
+            turnCount: 0,
+            gameIndex: gameIndex,
+            active: true)
+      }
+
+      func finalizeGame (_ lane: GameLane) -> GameData? {
+         let winner: Int?
+         if case .playerWon(let idx) = lane.game.terminalCondition { winner = idx }
+         else { winner = nil }
+
+         let examplesWithValues = lane.examples.map { ex in
+            let value: Float
+            if let w = winner { value = (ex.playerIndex == w) ? 1.0 : -1.0 }
+            else { value = 0.0 }
+            return TrainingExample(
+               turnNumber: ex.turnNumber, playerIndex: ex.playerIndex,
+               state: ex.state, policy: ex.policy, value: value)
+         }
+         return GameData(
+            gameIndex: lane.gameIndex, seed: baseSeed + UInt64(lane.gameIndex),
+            playerCount: playerCount, winner: winner, turnCount: lane.turnCount,
+            examples: examplesWithValues, moves: lane.moves)
+      }
+
+      // Initialize lanes
+      var lanes = (0..<actualLanes).compactMap { initLane($0) }
+      var completedCount = 0
+
+      // Ensure network is in inference mode
+      mctsSearch.network.train(false)
+
+      while lanes.contains(where: { $0.active }) {
+         // --- Simulation phase: monteCarloSamples rounds of batched selection + eval ---
+         for _ in 0..<mctsSearch.monteCarloSamples {
+            var pending: [(laneIdx: Int, result: SelectionResult)] = []
+
+            for i in lanes.indices {
+               guard lanes[i].active else { continue }
+               let result = mctsSearch.selectLeaf(root: lanes[i].mctsRoot, game: lanes[i].game)
+               if let terminalValue = result.terminalValue {
+                  mctsSearch.backpropagate(result: result, leafValue: terminalValue)
+               } else {
+                  pending.append((i, result))
+               }
+            }
+
+            if !pending.isEmpty {
+               let leafGames = pending.map { $0.result.leafGame }
+               let (allLogits, allValues) = mctsSearch.batchEvaluate(leafGames: leafGames)
+               for (j, (_, result)) in pending.enumerated() {
+                  let mask = result.leafGame.legalMoveMaskForCurrentPlayer()
+                  mctsSearch.expandLeaf(node: result.leafNode, logits: allLogits[j], legalMask: mask)
+                  mctsSearch.backpropagate(result: result, leafValue: allValues[j])
+               }
+            }
+         }
+
+         // --- Move application phase ---
+         for i in lanes.indices {
+            guard lanes[i].active else { continue }
+
+            // Check timeout
+            if lanes[i].turnCount >= maxTurns {
+               print("Warning: Game \(lanes[i].gameIndex) reached maximum turn limit (\(maxTurns))")
+               if nextGameIndex < gameCount, let lane = initLane(nextGameIndex) {
+                  lanes[i] = lane; nextGameIndex += 1
+               } else {
+                  lanes[i].active = false
+               }
+               continue
+            }
+
+            let policy = mctsSearch.visitCountPolicy(root: lanes[i].mctsRoot, temperature: temperature)
+            let currentPlayer = lanes[i].game.currentPlayer
+            let stateEncoding = lanes[i].game.encoding().map { Float($0) }
+            let moveIndex = sampleMove(from: policy, rng: &lanes[i].rng)
+
+            lanes[i].examples.append(TrainingExample(
+               turnNumber: lanes[i].turnCount, playerIndex: currentPlayer,
+               state: stateEncoding, policy: policy, value: 0.0))
+            lanes[i].moves.append((playerIndex: currentPlayer, moveIndex: moveIndex))
+
+            lanes[i].game.applyMove(canonicalMoveIndex: moveIndex)
+            lanes[i].mctsRoot = MCTSNode()
+            lanes[i].turnCount += 1
+
+            // Check if game is complete
+            if case .inProgress = lanes[i].game.terminalCondition { } else {
+               if let gameData = finalizeGame(lanes[i]) {
+                  completedGames.append(gameData)
+                  for (pIdx, mIdx) in gameData.moves {
+                     statistics.recordMove(moveIndex: mIdx, playerIndex: pIdx, winner: gameData.winner)
+                  }
+               }
+               completedCount += 1
+               if completedCount % 100 == 0 {
+                  print("Completed \(completedCount)/\(gameCount) games...")
+               }
+               if nextGameIndex < gameCount, let lane = initLane(nextGameIndex) {
+                  lanes[i] = lane; nextGameIndex += 1
+               } else {
+                  lanes[i].active = false
+               }
+            }
+         }
+      }
+
+      return (completedGames, statistics)
+   }
+
    /// Generate training data programmatically (without parsing command-line args)
    public static func generateTrainingData (
       gameCount: Int,
@@ -302,7 +462,8 @@ public struct DataGenerator {
       outputPath: String,
       monteCarloSamples: Int = 0,
       cPuct: Float = 1.5,
-      mctsDebug: Bool = false) throws {
+      mctsDebug: Bool = false,
+      batchSize: Int = 128) throws {
 
       print("Configuration:")
       print("  Games:            \(gameCount)")
@@ -315,6 +476,7 @@ public struct DataGenerator {
       print("  Output:           \(outputPath)")
       if monteCarloSamples > 0 {
          print("  MCTS sims/move:   \(monteCarloSamples)  (c_puct=\(cPuct))")
+         print("  Batch size:       \(batchSize)")
       }
 
       // Initialize agent for self-play
@@ -325,7 +487,7 @@ public struct DataGenerator {
       let mctsSearch: MCTSSearch?
       if monteCarloSamples > 0, let neuralAgent = agent as? SplendorNeuralAgent {
          mctsSearch = neuralAgent.makeMCTSSearch(monteCarloSamples: monteCarloSamples, cPuct: cPuct, debug: mctsDebug)
-         print("  MCTS enabled with \(monteCarloSamples) samples per move")
+         print("  MCTS enabled with \(monteCarloSamples) samples per move, batch size \(batchSize)")
       } else {
          mctsSearch = nil
          if monteCarloSamples > 0 {
@@ -338,35 +500,48 @@ public struct DataGenerator {
       var successfulGames = 0
       var statistics = MoveStatistics()
 
-      for gameIndex in 0..<gameCount {
-         let gameSeed = seed + UInt64(gameIndex)
-         if gameIndex % 100 == 0 {
-            print("Generating game \(gameIndex + 1)/\(gameCount) (seed: \(gameSeed))...")
-         } 
-
-         if let gameData = playGameAndCollectData(
+      if let mcts = mctsSearch {
+         // Batched path: run laneCount games in parallel, one network call per simulation round
+         let (batchedGames, batchedStats) = batchedGenerateGames(
+            mctsSearch: mcts,
+            gameCount: gameCount,
             playerCount: playerCount,
-            agent: agent,
             temperature: temperature,
-            seed: gameSeed,
             maxTurns: maxTurns,
-            gameIndex: gameIndex,
-            mctsSearch: mctsSearch) {
-
-            allGameData.append(gameData)
-            successfulGames += 1
-
-            // Collect statistics from this game
-            for (playerIndex, moveIndex) in gameData.moves {
-               guard moveIndex >= 0 && moveIndex < 48 else {
-                  print("ERROR: Invalid move index \(moveIndex) from player \(playerIndex) in game \(gameIndex)")
-                  continue
-               }
-               statistics.recordMove(moveIndex: moveIndex, playerIndex: playerIndex, winner: gameData.winner)
+            baseSeed: seed,
+            laneCount: batchSize)
+         allGameData = batchedGames
+         statistics = batchedStats
+         successfulGames = batchedGames.count
+      } else {
+         // Serial path: one game at a time (random agent or no MCTS)
+         for gameIndex in 0..<gameCount {
+            let gameSeed = seed + UInt64(gameIndex)
+            if gameIndex % 100 == 0 {
+               print("Generating game \(gameIndex + 1)/\(gameCount) (seed: \(gameSeed))...")
             }
-         }
-         else {
-            print("  Failed or timed out, skipping...")
+
+            if let gameData = playGameAndCollectData(
+               playerCount: playerCount,
+               agent: agent,
+               temperature: temperature,
+               seed: gameSeed,
+               maxTurns: maxTurns,
+               gameIndex: gameIndex) {
+
+               allGameData.append(gameData)
+               successfulGames += 1
+
+               for (playerIndex, moveIndex) in gameData.moves {
+                  guard moveIndex >= 0 && moveIndex < 48 else {
+                     print("ERROR: Invalid move index \(moveIndex) from player \(playerIndex) in game \(gameIndex)")
+                     continue
+                  }
+                  statistics.recordMove(moveIndex: moveIndex, playerIndex: playerIndex, winner: gameData.winner)
+               }
+            } else {
+               print("  Failed or timed out, skipping...")
+            }
          }
       }
 
@@ -424,6 +599,7 @@ public struct DataGenerator {
       let monteCarloSamples = opts.get(option: "monte-carlo-samples", orElse: 0)
       let cPuct = opts.get(option: "c-puct", orElse: Float(1.5))
       let mctsDebug = opts.wasProvided(option: "mcts-debug")
+      let batchSize = opts.get(option: "batch-size", orElse: 128)
 
       try generateTrainingData(
          gameCount: gameCount,
@@ -435,7 +611,8 @@ public struct DataGenerator {
          outputPath: outputPath,
          monteCarloSamples: monteCarloSamples,
          cPuct: cPuct,
-         mctsDebug: mctsDebug
+         mctsDebug: mctsDebug,
+         batchSize: batchSize
       )
    }
 }

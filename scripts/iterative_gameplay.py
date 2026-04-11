@@ -8,7 +8,8 @@ Options:
    --initial-games N       Games to generate in the first cycle                    [default: 5000]
    --games-per-cycle N     Games to generate in subsequent cycles                  [default: 5000]
    --epochs N              Training epochs per cycle                               [default: 100]
-   --batch-size N          Training batch size                                     [default: 128]
+   --training-batch-size N Training batch size                                     [default: 128]
+   --generate-batch-size N Games to run in parallel during MCTS generation         [default: 128]
    --cycles N              Total number of cycles to run                           [default: 15]
    --eval-games N          Games to play when evaluating                           [default: 500]
    --champion-threshold N  Min win rate vs previous to accept new model (0=off)    [default: 0.52]
@@ -60,7 +61,8 @@ class Config:
    initialGames:      int
    gamesPerCycle:     int
    epochs:            int
-   batchSize:         int
+   trainingBatchSize: int
+   generateBatchSize: int
    maxCycles:         int
    evalGames:         int
    championThreshold: float
@@ -118,7 +120,8 @@ def generateData (cfg: Config, outputPath: str, agent: str, temperature: float) 
       "-t", f"{temperature:.2f}",
    ]
    if cfg.monteCarloSamples > 0:
-      args += ["--monte-carlo-samples", str(cfg.monteCarloSamples), "--c-puct", str(cfg.cPuct)]
+      args += ["--monte-carlo-samples", str(cfg.monteCarloSamples), "--c-puct", str(cfg.cPuct),
+               "-b", str(cfg.generateBatchSize)]
    return run(args, "generate") == 0
 
 
@@ -142,7 +145,7 @@ def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: floa
       cfg.binary, "train",
       "-i", inputPath,
       "-e", str(cfg.epochs),
-      "-b", str(cfg.batchSize),
+      "-b", str(cfg.trainingBatchSize),
       "-o", outputPath,
       "--learning-rate", str(learningRate),
       "--weight-decay", str(cfg.weightDecay),
@@ -224,7 +227,7 @@ def cycleStr (cfg: Config, cycle: int) -> str:
    return str(cycle).zfill(width)
 
 def modelPath (cfg: Config, cycle: int) -> str:
-   return f"{cfg.modelDir}/model_c{cycleStr(cfg, cycle)}_e{cfg.epochs}_b{cfg.batchSize}"
+   return f"{cfg.modelDir}/model_c{cycleStr(cfg, cycle)}_e{cfg.epochs}_b{cfg.trainingBatchSize}"
 
 def dataPath (cfg: Config, cycle: int) -> str:
    if cycle == 1:
@@ -301,7 +304,8 @@ def configFromArgs (args: dict) -> Config:
       initialGames       = int(args["--initial-games"]),
       gamesPerCycle      = int(args["--games-per-cycle"]),
       epochs             = int(args["--epochs"]),
-      batchSize          = int(args["--batch-size"]),
+      trainingBatchSize  = int(args["--training-batch-size"]),
+      generateBatchSize  = int(args["--generate-batch-size"]),
       maxCycles          = int(args["--cycles"]),
       evalGames          = int(args["--eval-games"]),
       championThreshold  = float(args["--champion-threshold"]),

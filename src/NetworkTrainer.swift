@@ -19,6 +19,7 @@ public struct NetworkTrainer {
       opts.addOption("Network Trainer", "b", "batch-size", "Batch size for training (default: 256)")
       opts.addOption("Network Trainer", "e", "epochs", "Number of training epochs (default: 10)")
       opts.addOption("Network Trainer", "r", "learning-rate", "Learning rate (default: 0.001)")
+      opts.addOption("Network Trainer", "l", "learning-rate-decay", "Learning rate decay rate (default: 1.0)")
       opts.addOption("Network Trainer", "f", "validation-split", "Fraction of data to use for validation (default: 0.1)")
       opts.addOption("Network Trainer", "O", "optimizer", "Optimizer: adam, sgd (default: adam)")
       opts.addOption("Network Trainer", "P", "policy-loss-weight", "Weight for policy loss (default: 1.0)")
@@ -188,6 +189,7 @@ public struct NetworkTrainer {
       batchSize: Int = 256,
       epochs: Int = 10,
       learningRate: Float = 0.001,
+      learningRateDecay: Float = 1.0,
       validationSplit: Float = 0.1,
       optimizerName: String = "adam",
       policyWeight: Float = 1.0,
@@ -219,7 +221,6 @@ public struct NetworkTrainer {
       print("Validation set: \(validationExamples.count) examples")
 
       let (network, metadata) = try loadOrCreateNetwork(modelPath: modelPath, seed: seed, dropoutRate: dropoutRate)
-      let optimizer = createOptimizer(name: optimizerName, learningRate: learningRate, weightDecay: weightDecay)
 
       // Training loop
       print("\nStarting training...")
@@ -238,6 +239,9 @@ public struct NetworkTrainer {
          var epochPolicyLoss: Float = 0.0
          var epochValueLoss: Float = 0.0
          var batchCount = 0
+
+         let optimizerLearningRate = learningRate * pow(learningRateDecay, Float(epoch - 1))
+         let optimizer = createOptimizer(name: optimizerName, learningRate: optimizerLearningRate, weightDecay: weightDecay)
 
          // Enable training mode (activates dropout)
          network.train()
@@ -367,6 +371,7 @@ public struct NetworkTrainer {
       let batchSize = opts.get(option: "batch-size", orElse: 256)
       let epochs = opts.get(option: "epochs", orElse: 10)
       let learningRate = opts.get(option: "learning-rate", orElse: Float(0.001))
+      let learningRateDecay = opts.get(option: "learning-rate-decay", orElse: Float(1.0))
       let validationSplit = opts.get(option: "validation-split", orElse: Float(0.1))
       let optimizerName = opts.get(option: "optimizer", orElse: "adam")
       let policyWeight = opts.get(option: "policy-loss-weight", orElse: Float(1.0))
@@ -378,21 +383,21 @@ public struct NetworkTrainer {
 
       // Print configuration
       print("Configuration:")
-      print("  Input:            \(inputPath)")
-      print("  Output:           \(outputPath ?? "(none)")")
-      print("  Model:            \(modelPath ?? "(new)")")
-      print("  Epochs:           \(epochs)")
-      print("  Batch size:       \(batchSize)")
-      print("  Learning rate:    \(learningRate)")
-      print("  Weight decay:     \(weightDecay)")
-      print("  Validation split: \(String(format: "%.2f", validationSplit))")
-      print("  Optimizer:        \(optimizerName)")
-      print("  Policy weight:    \(policyWeight)")
-      print("  Value weight:     \(valueWeight)")
-      print("  Early stopping:   \(earlyStoppingPatience == 0 ? "disabled" : "\(earlyStoppingPatience) epochs")")
-      print("  Min policy wt:    \(minPolicyWeight)")
-      print("  Dropout:          \(dropoutRate)")
-      print("  Seed:             \(seed)")
+      print("  Input:                \(inputPath)")
+      print("  Output:               \(outputPath ?? "(none)")")
+      print("  Model:                \(modelPath ?? "(new)")")
+      print("  Epochs:               \(epochs)")
+      print("  Batch size:           \(batchSize)")
+      print("  Learning rate, decay: \(learningRate), \(learningRateDecay)")
+      print("  Weight decay:         \(weightDecay)")
+      print("  Validation split:     \(String(format: "%.2f", validationSplit))")
+      print("  Optimizer:            \(optimizerName)")
+      print("  Policy weight:        \(policyWeight)")
+      print("  Value weight:         \(valueWeight)")
+      print("  Early stopping:       \(earlyStoppingPatience == 0 ? "disabled" : "\(earlyStoppingPatience) epochs")")
+      print("  Min policy wt:        \(minPolicyWeight)")
+      print("  Dropout:              \(dropoutRate)")
+      print("  Seed:                 \(seed)")
 
       try trainModel(
          inputPath: inputPath,
@@ -402,6 +407,7 @@ public struct NetworkTrainer {
          batchSize: batchSize,
          epochs: epochs,
          learningRate: learningRate,
+         learningRateDecay: learningRateDecay,
          validationSplit: validationSplit,
          optimizerName: optimizerName,
          policyWeight: policyWeight,
