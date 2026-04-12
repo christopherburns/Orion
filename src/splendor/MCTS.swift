@@ -266,7 +266,7 @@ public struct MCTSSearch {
    }
 
    /// Print the search tree and policy distribution after a completed search.
-   private func printSearchResults (root: MCTSNode, policy: [Float], turn: Int) {
+   public func printSearchResults (root: MCTSNode, policy: [Float], turn: Int) {
       print("\n┌─ MCTS  \(monteCarloSamples) sims · turn \(turn) · root N=\(root.visitCount)  (Q = current player's perspective at each level)")
 
       let depth1 = root.children.enumerated()

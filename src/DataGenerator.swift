@@ -414,6 +414,9 @@ public struct DataGenerator {
             }
 
             let policy = mctsSearch.visitCountPolicy(root: lanes[i].mctsRoot, temperature: temperature)
+            if mctsSearch.debug && i == 0 {
+               mctsSearch.printSearchResults(root: lanes[i].mctsRoot, policy: policy, turn: lanes[i].turnCount)
+            }
             let currentPlayer = lanes[i].game.currentPlayer
             let stateEncoding = lanes[i].game.encoding().map { Float($0) }
             let moveIndex = sampleMove(from: policy, rng: &lanes[i].rng)
