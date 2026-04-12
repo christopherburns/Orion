@@ -231,6 +231,8 @@ public struct NetworkTrainer {
       var bestModelMetadata: ModelMetadata? = nil  // Metadata for best model
       var bestNetwork: PolicyValueNetwork? = nil  // Keep best model copy in memory
 
+      let optimizer = createOptimizer(name: optimizerName, learningRate: learningRate, weightDecay: weightDecay)
+
       for epoch in 1...epochs {
          // Shuffle training data each epoch
          var shuffledTraining = trainingExamples
@@ -239,9 +241,6 @@ public struct NetworkTrainer {
          var epochPolicyLoss: Float = 0.0
          var epochValueLoss: Float = 0.0
          var batchCount = 0
-
-         let optimizerLearningRate = learningRate * pow(learningRateDecay, Float(epoch - 1))
-         let optimizer = createOptimizer(name: optimizerName, learningRate: optimizerLearningRate, weightDecay: weightDecay)
 
          // Enable training mode (activates dropout)
          network.train()
