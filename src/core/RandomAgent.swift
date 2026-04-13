@@ -21,4 +21,3 @@ public class DumbAgent: AgentProtocol {
       return (policyLogits, valueEstimate)
    }
 }
-

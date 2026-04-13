@@ -161,7 +161,7 @@ public struct DataGenerator {
       opts.addOption("Data Generator", "s", "seed", "Random seed for game generation (default: random)")
       opts.addOption("Data Generator", "t", "temperature", "Sampling temperature for move selection (default: 1.0, higher = more exploration)")
       opts.addOption("Data Generator", "", "max-turns", "Maximum turns per game before timeout (default: 1000)")
-      opts.addOption("Data Generator", "", "monte-carlo-samples", "MCTS simulations per move (default: 0 = disabled, requires neural agent)")
+      opts.addOption("Data Generator", "", "monte-carlo-samples", "MCTS simulations per move (default: 0 = disabled)")
       opts.addOption("Data Generator", "", "c-puct", "MCTS exploration constant (default: 1.5)")
       opts.addOption("Data Generator", "b", "batch-size", "Number of games to run in parallel during MCTS generation (default: 128)")
       opts.addOption("Data Generator", "", "mcts-debug", "Print MCTS search tree and π after every move (very verbose, for debugging)", requireArgument: false)
@@ -369,8 +369,8 @@ public struct DataGenerator {
       var lanes = (0..<actualLanes).compactMap { initLane($0) }
       var completedCount = 0
 
-      // Ensure network is in inference mode
-      mctsSearch.network.train(false)
+      // Ensure agent is in inference mode (e.g. disable dropout for neural agents)
+      mctsSearch.agent.prepareForInference()
 
       while lanes.contains(where: { $0.active }) {
          // --- Simulation phase: monteCarloSamples rounds of batched selection + eval ---
@@ -486,16 +486,13 @@ public struct DataGenerator {
       let agents = initializeAgents(playerCount: 1, agentSpecs: [agentSpec], seed: seed)
       let agent = agents[0]
 
-      // Build MCTS search if requested and agent is neural
+      // Build MCTS search if requested
       let mctsSearch: MCTSSearch?
-      if monteCarloSamples > 0, let neuralAgent = agent as? SplendorNeuralAgent {
-         mctsSearch = neuralAgent.makeMCTSSearch(monteCarloSamples: monteCarloSamples, cPuct: cPuct, debug: mctsDebug)
+      if monteCarloSamples > 0 {
+         mctsSearch = MCTSSearch(agent: agent, monteCarloSamples: monteCarloSamples, cPuct: cPuct, debug: mctsDebug)
          print("  MCTS enabled with \(monteCarloSamples) samples per move, batch size \(batchSize)")
       } else {
          mctsSearch = nil
-         if monteCarloSamples > 0 {
-            print("  Warning: --monte-carlo-samples ignored (MCTS requires a neural agent)")
-         }
       }
 
       // Generate games and collect training data

@@ -41,6 +41,10 @@ func initializeAgents (playerCount: Int, agentSpecs: [String], seed: UInt64) -> 
          agent = HumanAgent()
          print("Using human player for player \(index)")
       }
+      else if spec.lowercased() == "heuristic" {
+         agent = SplendorHeuristicAgent(prngSeed: seed + UInt64(index))
+         print("Using heuristic agent for player \(index)")
+      }
       else if spec.lowercased() == "uninitialized" {
          // Use uninitialized neural agent with deterministic seed
          agent = SplendorNeuralAgent(seed: seed + UInt64(index))

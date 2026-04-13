@@ -5,6 +5,7 @@ Usage:
    iterative_gameplay.py [options]
 
 Options:
+   --initial-data PATH     Path to initial training dataset (if set, skip random generation)
    --initial-games N       Games to generate in the first cycle                    [default: 5000]
    --games-per-cycle N     Games to generate in subsequent cycles                  [default: 5000]
    --epochs N              Training epochs per cycle                               [default: 100]
@@ -38,6 +39,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from typing import Optional
 
 from docopt import docopt
 
@@ -58,6 +60,7 @@ from docopt import docopt
 
 @dataclass
 class Config:
+   initialData:       Optional[str]
    initialGames:      int
    gamesPerCycle:     int
    epochs:            int
@@ -86,7 +89,7 @@ class Config:
 
 # ── Shell helpers ──────────────────────────────────────────────────────────────
 
-_command_log: str | None = None   # set in main()
+_command_log: Optional[str] = None   # set in main()
 
 BOLD_CYAN  = "\033[1;36m"
 RESET      = "\033[0m"
@@ -139,7 +142,7 @@ def generateInitialData (cfg: Config, outputPath: str) -> bool:
    return run(args, "generate-initial") == 0
 
 
-def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: float, prevModelPath: str | None = None, minPolicyWeight: float = 0.0) -> bool:
+def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: float, prevModelPath: Optional[str] = None, minPolicyWeight: float = 0.0) -> bool:
    """Train (or fine-tune) a model on inputPath, saving weights to outputPath."""
    args = [
       cfg.binary, "train",
@@ -195,7 +198,7 @@ def evaluateVsPrevious (cfg: Config, modelPath: str, prevModelPath: str, outputF
 
 # ── Evaluation parsing ─────────────────────────────────────────────────────────
 
-def parseWinRate (evalFile: str, playerIndex: int = 0) -> float | None:
+def parseWinRate (evalFile: str, playerIndex: int = 0) -> Optional[float]:
    """Parse win rate for a player from an orion play output file. Returns None if parsing fails."""
    try:
       with open(evalFile) as f:
@@ -241,16 +244,20 @@ def evalPath (cfg: Config, cycle: int, suffix: str = "") -> str:
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
 def runFirstCycle (cfg: Config) -> str:
-   """Bootstrap: generate data with random agent, train first model, evaluate."""
-   print(f"\n=== Cycle 1: Generating {cfg.initialGames} games with random agent ===")
-   data = dataPath(cfg, 1)
-   if not generateInitialData(cfg, data):
-      sys.exit(1)
+   """Bootstrap: use provided initial data or generate with random agent, then train first model."""
+   if cfg.initialData:
+      print(f"\n=== Cycle 1: Using provided training data ===")
+      trainingInput = cfg.initialData
+   else:
+      print(f"\n=== Cycle 1: Generating {cfg.initialGames} games with random agent ===")
+      data = dataPath(cfg, 1)
+      if not generateInitialData(cfg, data):
+         sys.exit(1)
+      trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.bin.lz4"
 
    print(f"\n=== Cycle 1: Training model ===")
    model = modelPath(cfg, 1)
    lr = cycleLearningRate(cfg, 1)
-   trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.bin.lz4"
    if not trainModel(cfg, trainingInput, model, learningRate=lr, minPolicyWeight=0.0):
       sys.exit(1)
 
@@ -301,6 +308,7 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> str:
 
 def configFromArgs (args: dict) -> Config:
    return Config(
+      initialData        = args["--initial-data"],
       initialGames       = int(args["--initial-games"]),
       gamesPerCycle      = int(args["--games-per-cycle"]),
       epochs             = int(args["--epochs"]),

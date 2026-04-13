@@ -1,6 +1,5 @@
 import Foundation
-import MLX
-import MLXNN
+import Core
 
 // MARK: - Batching support types
 
@@ -53,20 +52,20 @@ public final class MCTSNode {
 
 // MARK: - MCTSSearch
 
-/// AlphaZero-style MCTS using a PolicyValueNetwork for both prior guidance and leaf evaluation.
+/// AlphaZero-style MCTS using any AgentProtocol for prior guidance and leaf evaluation.
 ///
 /// Provides two usage modes:
 /// 1. `search()` — single-game, self-contained (used by GameplayTester/evaluation)
 /// 2. Batching primitives (`selectLeaf`, `batchEvaluate`, `expandLeaf`, `backpropagate`) —
-///    used by DataGenerator to run many games in parallel with one network call per simulation round.
+///    used by DataGenerator to run many games in parallel.
 public struct MCTSSearch {
-   public let network: PolicyValueNetwork
+   public let agent: any AgentProtocol
    public let monteCarloSamples: Int
    public let cPuct: Float
    public let debug: Bool
 
-   init (network: PolicyValueNetwork, monteCarloSamples: Int, cPuct: Float, debug: Bool = false) {
-      self.network = network
+   public init (agent: any AgentProtocol, monteCarloSamples: Int, cPuct: Float, debug: Bool = false) {
+      self.agent = agent
       self.monteCarloSamples = monteCarloSamples
       self.cPuct = cPuct
       self.debug = debug
@@ -76,7 +75,6 @@ public struct MCTSSearch {
 
    /// Run MCTS from the current game state and return a policy distribution.
    public func search (game: Game, temperature: Float) -> [Float] {
-      network.train(false)
       let root = MCTSNode()
 
       for _ in 0..<monteCarloSamples {
@@ -84,12 +82,7 @@ public struct MCTSSearch {
          if let terminalValue = result.terminalValue {
             backpropagate(result: result, leafValue: terminalValue)
          } else {
-            let stateFloats = result.leafGame.encoding().map { Float($0) }
-            let stateArray = MLXArray(stateFloats).reshaped([1, PolicyValueNetwork.INPUT_DIMENSIONS])
-            let (policyTensor, valueTensor) = network.execute(stateArray)
-            eval(policyTensor, valueTensor)
-            let logits = policyTensor[0].asArray(Float.self)
-            let value = valueTensor[0, 0].item(Float.self)
+            let (logits, value) = agent.predict(game: result.leafGame, currentPlayerIndex: result.leafGame.currentPlayer)
             let legalMask = result.leafGame.legalMoveMaskForCurrentPlayer()
             expandLeaf(node: result.leafNode, logits: logits, legalMask: legalMask)
             backpropagate(result: result, leafValue: value)
@@ -166,37 +159,17 @@ public struct MCTSSearch {
       }
    }
 
-   /// Batch-evaluate multiple leaf game states in one network forward pass.
+   /// Evaluate multiple leaf game states. Calls agent.predict() per game.
    public func batchEvaluate (leafGames: [Game]) -> (policyLogits: [[Float]], values: [Float]) {
-      let batchSize = leafGames.count
-      let inputDim = PolicyValueNetwork.INPUT_DIMENSIONS
-      let policyDim = PolicyValueNetwork.POLICY_DIMENSIONS
-
-      var batchFloats = [Float](repeating: 0, count: batchSize * inputDim)
-      for (j, game) in leafGames.enumerated() {
-         let encoding = game.encoding()
-         let base = j * inputDim
-         for k in 0..<inputDim {
-            batchFloats[base + k] = Float(encoding[k])
-         }
-      }
-
-      let inputArray = MLXArray(batchFloats).reshaped([batchSize, inputDim])
-      let (policyTensor, valueTensor) = network.execute(inputArray)
-      eval(policyTensor, valueTensor)
-
-      let flatLogits = policyTensor.asArray(Float.self)
-      let flatValues = valueTensor.asArray(Float.self)
-
       var policyLogits: [[Float]] = []
       var values: [Float] = []
-      policyLogits.reserveCapacity(batchSize)
-      values.reserveCapacity(batchSize)
+      policyLogits.reserveCapacity(leafGames.count)
+      values.reserveCapacity(leafGames.count)
 
-      for j in 0..<batchSize {
-         let base = j * policyDim
-         policyLogits.append(Array(flatLogits[base..<base + policyDim]))
-         values.append(flatValues[j])
+      for game in leafGames {
+         let (logits, value) = agent.predict(game: game, currentPlayerIndex: game.currentPlayer)
+         policyLogits.append(logits)
+         values.append(value)
       }
       return (policyLogits, values)
    }

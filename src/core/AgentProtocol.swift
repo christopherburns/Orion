@@ -13,9 +13,13 @@ public protocol AgentProtocol {
 
    /// True for human players that read moves interactively from stdin. Default is false.
    var isHuman: Bool { get }
+
+   /// Called before batch inference to set the agent into evaluation mode (e.g. disable dropout).
+   func prepareForInference ()
 }
 
 extension AgentProtocol {
    public var isHuman: Bool { false }
+   public func prepareForInference () {}
 }
 

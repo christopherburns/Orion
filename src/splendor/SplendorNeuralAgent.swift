@@ -379,7 +379,11 @@ public class SplendorNeuralAgent: AgentProtocol {
    ///   array of probabilities, one for each canonical move, and valueEstimate is a float between -1 and 1
    /// Create an MCTSSearch backed by this agent's network.
    public func makeMCTSSearch (monteCarloSamples: Int, cPuct: Float, debug: Bool = false) -> MCTSSearch {
-      MCTSSearch(network: network, monteCarloSamples: monteCarloSamples, cPuct: cPuct, debug: debug)
+      MCTSSearch(agent: self, monteCarloSamples: monteCarloSamples, cPuct: cPuct, debug: debug)
+   }
+
+   public func prepareForInference () {
+      network.train(false)
    }
 
    public func predict (game: any GameProtocol, currentPlayerIndex: Int) -> (policyLogits: [Float], valueEstimate: Float) {
