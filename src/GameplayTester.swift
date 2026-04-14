@@ -28,6 +28,7 @@ public struct GameplayTester {
       opts.addOption("Gameplay Tester", "", "show-probabilities", "Show move probability distribution for each turn (default: false)")
       opts.addOption("Gameplay Tester", "", "max-turns", "Maximum turns per game before timeout (default: 1000)")
       opts.addOption("Gameplay Tester", "b", "batch-size", "Number of games to run in parallel (default: 64)")
+      opts.addOption("Gameplay Tester", "", "serial", "Force single-threaded evaluation (default: concurrent)", requireArgument: false)
    }
 
    /// Convert logits to probabilities by masking illegal moves and applying softmax
@@ -288,8 +289,8 @@ public struct GameplayTester {
       agents: [any AgentProtocol],
       temperature: Float,
       maxTurns: Int,
-      laneCount: Int
-   ) -> [(condition: GameTerminalCondition, turnCount: Int)] {
+      laneCount: Int,
+      baseGameIndex: Int = 0) -> [(condition: GameTerminalCondition, turnCount: Int)] {
 
       struct EvalLane {
          var game: Splendor.Game
@@ -356,9 +357,6 @@ public struct GameplayTester {
                // Check terminal
                if case .inProgress = lanes[laneIdx].game.terminalCondition {} else {
                   results.append((condition: lanes[laneIdx].game.terminalCondition, turnCount: lanes[laneIdx].turnCount))
-                  if results.count % 100 == 0 {
-                     print("Completed \(results.count)/\(gameCount) games...")
-                  }
                   if nextGameIndex < gameCount, let lane = initLane(nextGameIndex) {
                      lanes[laneIdx] = lane; nextGameIndex += 1
                   } else {
@@ -385,6 +383,7 @@ public struct GameplayTester {
       let temperature = opts.get(option: "temperature", orElse: Float(0))
       let maxTurns = opts.get(option: "max-turns", orElse: 1000)
       let batchSize = opts.get(option: "batch-size", orElse: 64)
+      let serial = opts.wasProvided(option: "serial")
 
       // Print configuration
       let agentDesc = agentSpecs.isEmpty ? "random" : agentSpecs.joined(separator: ", ")
@@ -395,7 +394,6 @@ public struct GameplayTester {
       print("  Temperature:      \(String(format: "%.2f", temperature))")
       print("  Max turns:        \(maxTurns)")
       print("  Seed:             \(seed)")
-
 
       // Initialize agents based on command-line specifications
       let agents = initializeAgents(playerCount: playerCount, agentSpecs: agentSpecs, seed: seed)
@@ -409,14 +407,61 @@ public struct GameplayTester {
          return
       }
 
-      let gameResults = batchedPlayGames(
-         gameCount: gameCount,
-         playerCount: playerCount,
-         seed: seed,
-         agents: agents,
-         temperature: temperature,
-         maxTurns: maxTurns,
-         laneCount: batchSize)
+      // Partition games into GCD tasks
+      let taskCount = (gameCount + batchSize - 1) / batchSize
+      print("  Batch size:       \(batchSize)")
+      print("  Tasks:            \(taskCount)\(serial ? " (serial)" : " (concurrent)")")
+
+      let workQueue: DispatchQueue
+      if serial {
+         workQueue = DispatchQueue(label: "orion.play.work")
+      } else {
+         workQueue = DispatchQueue(label: "orion.play.work", attributes: .concurrent)
+      }
+      let resultQueue = DispatchQueue(label: "orion.play.results")
+      let group = DispatchGroup()
+
+      let taskResults = UnsafeMutableBufferPointer<[(condition: GameTerminalCondition, turnCount: Int)]?>.allocate(capacity: taskCount)
+      taskResults.initialize(repeating: nil)
+      defer { taskResults.deallocate() }
+
+      for taskIndex in 0..<taskCount {
+         let taskOffset = taskIndex * batchSize
+         let taskGameCount = min(batchSize, gameCount - taskOffset)
+         let taskBaseSeed = seed + UInt64(taskOffset)
+
+         group.enter()
+         workQueue.async {
+            let taskAgents = initializeAgents(playerCount: playerCount, agentSpecs: agentSpecs, seed: taskBaseSeed)
+
+            let results = batchedPlayGames(
+               gameCount: taskGameCount,
+               playerCount: playerCount,
+               seed: taskBaseSeed,
+               agents: taskAgents,
+               temperature: temperature,
+               maxTurns: maxTurns,
+               laneCount: taskGameCount,
+               baseGameIndex: taskOffset)
+
+            taskResults[taskIndex] = results
+            resultQueue.async {
+               let completed = taskResults.compactMap({ $0 }).reduce(0, { $0 + $1.count })
+               print("Completed \(completed)/\(gameCount) games...")
+               group.leave()
+            }
+         }
+      }
+
+      group.wait()
+
+      // Merge results from all tasks
+      var gameResults: [(condition: GameTerminalCondition, turnCount: Int)] = []
+      for taskIndex in 0..<taskCount {
+         if let results = taskResults[taskIndex] {
+            gameResults.append(contentsOf: results)
+         }
+      }
 
       var totalTurnCount = 0
       var playerWinCounts: [Int: Int] = [:]
