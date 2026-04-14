@@ -128,7 +128,7 @@ def generateData (cfg: Config, outputPath: str, agent: str, temperature: float) 
    return run(args, "generate") == 0
 
 
-def generateInitialData (cfg: Config, outputPath: str) -> bool:
+def generateInitialData_RandomAgent (cfg: Config, outputPath: str) -> bool:
    """Play the first batch of games using the random agent.
    MCTS is not used for cycle 1 — the random agent has no value head."""
    args = [
@@ -136,6 +136,19 @@ def generateInitialData (cfg: Config, outputPath: str) -> bool:
       "-o", outputPath,
       "-n", str(cfg.initialGames),
       "-a", "random",
+      "--monte-carlo-samples", str(cfg.monteCarloSamples),
+      "-t", f"{cfg.initialTemp:.2f}",
+   ]
+   return run(args, "generate-initial") == 0
+
+def generateInitialData_HeuristicAgent (cfg: Config, outputPath: str) -> bool:
+   """Play the first batch of games using the heuristic agent.
+   MCTS is heavily relied on for cycle 1 — the heuristic agent has a useful value head, but random policy head."""
+   args = [
+      cfg.binary, "generate",
+      "-o", outputPath,
+      "-n", str(cfg.initialGames),
+      "-a", "heuristic",
       "--monte-carlo-samples", str(cfg.monteCarloSamples),
       "-t", f"{cfg.initialTemp:.2f}",
    ]
@@ -251,7 +264,7 @@ def runFirstCycle (cfg: Config) -> str:
    else:
       print(f"\n=== Cycle 1: Generating {cfg.initialGames} games with random agent ===")
       data = dataPath(cfg, 1)
-      if not generateInitialData(cfg, data):
+      if not generateInitialData_HeuristicAgent(cfg, data):
          sys.exit(1)
       trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.bin.lz4"
 
