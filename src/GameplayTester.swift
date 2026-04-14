@@ -27,6 +27,7 @@ public struct GameplayTester {
       opts.addOption("Gameplay Tester", "v", "verbose", "Show detailed game output even for multiple games (default: auto)")
       opts.addOption("Gameplay Tester", "", "show-probabilities", "Show move probability distribution for each turn (default: false)")
       opts.addOption("Gameplay Tester", "", "max-turns", "Maximum turns per game before timeout (default: 1000)")
+      opts.addOption("Gameplay Tester", "b", "batch-size", "Number of games to run in parallel (default: 64)")
    }
 
    /// Convert logits to probabilities by masking illegal moves and applying softmax
@@ -279,6 +280,99 @@ public struct GameplayTester {
    }
 
 
+   /// Batched game evaluation — runs multiple games concurrently, grouping agent predictions by player.
+   static func batchedPlayGames (
+      gameCount: Int,
+      playerCount: Int,
+      seed: UInt64,
+      agents: [any AgentProtocol],
+      temperature: Float,
+      maxTurns: Int,
+      laneCount: Int
+   ) -> [(condition: GameTerminalCondition, turnCount: Int)] {
+
+      struct EvalLane {
+         var game: Splendor.Game
+         var rng: SeededRandomNumberGenerator
+         var turnCount: Int
+         var gameIndex: Int
+         var active: Bool
+      }
+
+      let actualLanes = min(laneCount, gameCount)
+      var nextGameIndex = actualLanes
+
+      func initLane (_ gameIndex: Int) -> EvalLane? {
+         let gameSeed = seed + UInt64(gameIndex)
+         guard let game = Splendor.Game(playerCount: playerCount, seed: gameSeed) else { return nil }
+         return EvalLane(game: game, rng: SeededRandomNumberGenerator(seed: gameSeed), turnCount: 0, gameIndex: gameIndex, active: true)
+      }
+
+      var lanes = (0..<actualLanes).compactMap { initLane($0) }
+      var results: [(condition: GameTerminalCondition, turnCount: Int)] = []
+
+      // Prepare agents for inference
+      for agent in agents { agent.prepareForInference() }
+
+      while lanes.contains(where: { $0.active }) {
+         // Group active lanes by current player index
+         var groupsByPlayer: [Int: [Int]] = [:]  // playerIndex -> [lane indices]
+         for i in lanes.indices where lanes[i].active {
+            if lanes[i].turnCount >= maxTurns {
+               results.append((condition: .timedOut, turnCount: lanes[i].turnCount))
+               if nextGameIndex < gameCount, let lane = initLane(nextGameIndex) {
+                  lanes[i] = lane; nextGameIndex += 1
+               } else {
+                  lanes[i].active = false
+               }
+               continue
+            }
+            let player = lanes[i].game.currentPlayer
+            groupsByPlayer[player, default: []].append(i)
+         }
+
+         // Batch predict per agent
+         for (playerIndex, laneIndices) in groupsByPlayer {
+            let agent = agents[playerIndex]
+            let games: [any GameProtocol] = laneIndices.map { lanes[$0].game }
+            let playerIndices = laneIndices.map { lanes[$0].game.currentPlayer }
+            let predictions = agent.batchPredict(games: games, currentPlayerIndices: playerIndices)
+
+            for (j, laneIdx) in laneIndices.enumerated() {
+               let logits = predictions[j].policyLogits
+               let validMoveMask = lanes[laneIdx].game.legalMoveMaskForCurrentPlayer()
+
+               let moveResult = temperature > 0
+                  ? sampleMoveWithTemperature(logits: logits, validMoveMask: validMoveMask, temperature: temperature, rng: &lanes[laneIdx].rng)
+                  : sampleMove(validMoveMask: validMoveMask, movePreferences: logits).map { ($0, [Float]()) }
+
+               guard let (moveIndex, _) = moveResult else {
+                  preconditionFailure("No valid moves in batched eval for game \(lanes[laneIdx].gameIndex)")
+               }
+
+               lanes[laneIdx].game.applyMove(canonicalMoveIndex: moveIndex)
+               lanes[laneIdx].turnCount += 1
+
+               // Check terminal
+               if case .inProgress = lanes[laneIdx].game.terminalCondition {} else {
+                  results.append((condition: lanes[laneIdx].game.terminalCondition, turnCount: lanes[laneIdx].turnCount))
+                  if results.count % 100 == 0 {
+                     print("Completed \(results.count)/\(gameCount) games...")
+                  }
+                  if nextGameIndex < gameCount, let lane = initLane(nextGameIndex) {
+                     lanes[laneIdx] = lane; nextGameIndex += 1
+                  } else {
+                     lanes[laneIdx].active = false
+                  }
+               }
+            }
+         }
+      }
+
+      return results
+   }
+
+
    public static func main () throws {
       let opts = OptionParser(help: "Play Splendor games using neural network or random agents")
       self.registerOptions(opts: opts)
@@ -290,6 +384,7 @@ public struct GameplayTester {
       let agentSpecs = opts.getAll(option: "agent", as: String.self)
       let temperature = opts.get(option: "temperature", orElse: Float(0))
       let maxTurns = opts.get(option: "max-turns", orElse: 1000)
+      let batchSize = opts.get(option: "batch-size", orElse: 64)
 
       // Print configuration
       let agentDesc = agentSpecs.isEmpty ? "random" : agentSpecs.joined(separator: ", ")
@@ -301,7 +396,6 @@ public struct GameplayTester {
       print("  Max turns:        \(maxTurns)")
       print("  Seed:             \(seed)")
 
-      let silence = gameCount > 1
 
       // Initialize agents based on command-line specifications
       let agents = initializeAgents(playerCount: playerCount, agentSpecs: agentSpecs, seed: seed)
@@ -315,21 +409,22 @@ public struct GameplayTester {
          return
       }
 
-      var gameResults: [(GameTerminalCondition, Int)] = []
+      let gameResults = batchedPlayGames(
+         gameCount: gameCount,
+         playerCount: playerCount,
+         seed: seed,
+         agents: agents,
+         temperature: temperature,
+         maxTurns: maxTurns,
+         laneCount: batchSize)
+
       var totalTurnCount = 0
       var playerWinCounts: [Int: Int] = [:]
       var tiedCount = 0
       var timedOutCount = 0
-      for gameIndex in 0..<gameCount {
-
-         if gameIndex % 100 == 0 {
-            print("Playing game \(gameIndex + 1)/\(gameCount) (seed: \(seed+UInt64(gameIndex)))...")
-         }
-         
-         let (terminalCondition, turnCount) = self.playGame(playerCount: playerCount, silence: silence, seed: seed+UInt64(gameIndex), agents: agents, temperature: temperature, maxTurns: maxTurns)
-         gameResults.append((terminalCondition, turnCount))
+      for (condition, turnCount) in gameResults {
          totalTurnCount += turnCount
-         switch terminalCondition {
+         switch condition {
          case .playerWon(let playerIndex):
             playerWinCounts[playerIndex, default: 0] += 1
          case .tied:

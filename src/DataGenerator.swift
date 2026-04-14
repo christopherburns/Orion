@@ -487,11 +487,12 @@ public struct DataGenerator {
       let agent = agents[0]
 
       // Build MCTS search if requested
-      let mctsSearch: MCTSSearch?
+      var mctsSearch: MCTSSearch? = nil
       if monteCarloSamples > 0 {
          mctsSearch = MCTSSearch(agent: agent, monteCarloSamples: monteCarloSamples, cPuct: cPuct, debug: mctsDebug)
          print("  MCTS enabled with \(monteCarloSamples) samples per move, batch size \(batchSize)")
-      } else {
+      } 
+      else {
          mctsSearch = nil
       }
 
@@ -513,7 +514,8 @@ public struct DataGenerator {
          allGameData = batchedGames
          statistics = batchedStats
          successfulGames = batchedGames.count
-      } else {
+      } 
+      else {
          // Serial path: one game at a time (random agent or no MCTS)
          for gameIndex in 0..<gameCount {
             let gameSeed = seed + UInt64(gameIndex)

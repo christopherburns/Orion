@@ -419,4 +419,37 @@ public class SplendorNeuralAgent: AgentProtocol {
 
       return (policyResult, valueEstimate)
    }
+
+   public func batchPredict (games: [any GameProtocol], currentPlayerIndices: [Int]) -> [(policyLogits: [Float], valueEstimate: Float)] {
+      let batchSize = games.count
+      if batchSize == 0 { return [] }
+
+      let inputDim = PolicyValueNetwork.INPUT_DIMENSIONS
+      let policyDim = PolicyValueNetwork.POLICY_DIMENSIONS
+
+      var batchFloats = [Float](repeating: 0, count: batchSize * inputDim)
+      for (j, game) in games.enumerated() {
+         let splendorGame = game as! Splendor.Game
+         let encoding = splendorGame.encoding()
+         let base = j * inputDim
+         for k in 0..<inputDim {
+            batchFloats[base + k] = Float(encoding[k])
+         }
+      }
+
+      let inputArray = MLXArray(batchFloats).reshaped([batchSize, inputDim])
+      let (policyTensor, valueTensor) = network.execute(inputArray)
+      eval(policyTensor, valueTensor)
+
+      let flatLogits = policyTensor.asArray(Float.self)
+      let flatValues = valueTensor.asArray(Float.self)
+
+      var results: [(policyLogits: [Float], valueEstimate: Float)] = []
+      results.reserveCapacity(batchSize)
+      for j in 0..<batchSize {
+         let base = j * policyDim
+         results.append((Array(flatLogits[base..<base + policyDim]), flatValues[j]))
+      }
+      return results
+   }
 }

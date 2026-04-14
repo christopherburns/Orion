@@ -16,10 +16,16 @@ public protocol AgentProtocol {
 
    /// Called before batch inference to set the agent into evaluation mode (e.g. disable dropout).
    func prepareForInference ()
+
+   /// Batch predict for multiple game states. Default implementation loops over predict().
+   func batchPredict (games: [any GameProtocol], currentPlayerIndices: [Int]) -> [(policyLogits: [Float], valueEstimate: Float)]
 }
 
 extension AgentProtocol {
    public var isHuman: Bool { false }
    public func prepareForInference () {}
+   public func batchPredict (games: [any GameProtocol], currentPlayerIndices: [Int]) -> [(policyLogits: [Float], valueEstimate: Float)] {
+      zip(games, currentPlayerIndices).map { predict(game: $0, currentPlayerIndex: $1) }
+   }
 }
 

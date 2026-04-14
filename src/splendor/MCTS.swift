@@ -159,17 +159,19 @@ public struct MCTSSearch {
       }
    }
 
-   /// Evaluate multiple leaf game states. Calls agent.predict() per game.
+   /// Evaluate multiple leaf game states via batched agent prediction.
    public func batchEvaluate (leafGames: [Game]) -> (policyLogits: [[Float]], values: [Float]) {
+      let games: [any GameProtocol] = leafGames
+      let playerIndices = leafGames.map { $0.currentPlayer }
+      let results = agent.batchPredict(games: games, currentPlayerIndices: playerIndices)
+
       var policyLogits: [[Float]] = []
       var values: [Float] = []
-      policyLogits.reserveCapacity(leafGames.count)
-      values.reserveCapacity(leafGames.count)
-
-      for game in leafGames {
-         let (logits, value) = agent.predict(game: game, currentPlayerIndex: game.currentPlayer)
-         policyLogits.append(logits)
-         values.append(value)
+      policyLogits.reserveCapacity(results.count)
+      values.reserveCapacity(results.count)
+      for r in results {
+         policyLogits.append(r.policyLogits)
+         values.append(r.valueEstimate)
       }
       return (policyLogits, values)
    }
