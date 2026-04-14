@@ -19,7 +19,8 @@ let package = Package(
       .target(
          name: "Core",
          dependencies: ["Utility"],
-         path: "src/core"
+         path: "src/core",
+         swiftSettings: [.unsafeFlags(["-g"])]
       ),
       .target(
          name: "Splendor",
@@ -28,12 +29,14 @@ let package = Package(
             .product(name: "MLX", package: "mlx-swift"),
             .product(name: "MLXNN", package: "mlx-swift")
          ],
-         path: "src/splendor"
+         path: "src/splendor",
+         swiftSettings: [.unsafeFlags(["-g"])]
       ),
       .target(
          name: "Utility",
          dependencies: [],
-         path: "src/utility"
+         path: "src/utility",
+         swiftSettings: [.unsafeFlags(["-g"])]
       ),
       .executableTarget(
          name: "orion",
@@ -43,7 +46,8 @@ let package = Package(
             .product(name: "MLXNN", package: "mlx-swift"),
             .product(name: "MLXOptimizers", package: "mlx-swift")],
          path: "src",
-         sources: ["Orion.swift", "GameplayTester.swift", "DataGenerator.swift", "NetworkTrainer.swift", "HumanAgent.swift", "Common.swift"]
+         sources: ["Orion.swift", "GameplayTester.swift", "DataGenerator.swift", "NetworkTrainer.swift", "HumanAgent.swift", "Common.swift"],
+         swiftSettings: [.unsafeFlags(["-g"])]
       ),
    ]
 )
