@@ -181,12 +181,21 @@ public struct MCTSSearch {
    /// Convert root visit counts to a probability distribution with temperature.
    ///   pi(a) = N(root, a)^(1/tau)
    /// At tau=0 (greedy), returns a one-hot on the most-visited action.
+   /// Falls back to prior distribution when no children have been visited
+   /// (e.g. monteCarloSamples=1, where only the root is expanded).
    public func visitCountPolicy (root: MCTSNode, temperature: Float) -> [Float] {
       var counts = [Float](repeating: 0.0, count: Game.CANONICAL_MOVE_COUNT)
       for (action, child) in root.children.enumerated() {
          if let child = child {
             counts[action] = Float(child.visitCount)
          }
+      }
+
+      let totalVisits = counts.reduce(0, +)
+
+      // No children visited — fall back to prior distribution
+      if totalVisits == 0 {
+         return root.isExpanded ? root.priors : counts
       }
 
       if temperature < 1e-6 {

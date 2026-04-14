@@ -164,9 +164,9 @@ public struct Game: GameProtocol {
    public var currentTurn: Int = 0
    public var phase: GamePhase = .normalAction
 
-   // Memoized canonical moves and legal move masks - should always be current and valid
+   // Memoized canonical moves and legal move mask for the current player
    private var _allMoves: [Move] = []
-   private var _legalMoveMasks: [[Bool]] = []
+   private var _currentPlayerLegalMoveMask: [Bool] = []
 
    public init? (playerCount: Int, seed: UInt64 = 0) {
       var allCards = Card.allCards()
@@ -198,10 +198,8 @@ public struct Game: GameProtocol {
 
       // Initialize memoized values
       self._allMoves = self.generateAllCanonicalMoves()
-      self._legalMoveMasks = (0..<playerCount).map { playerIndex in
-         self._allMoves.map { move in
-            self.isMoveLegal(move, forPlayer: playerIndex)
-         }
+      self._currentPlayerLegalMoveMask = self._allMoves.map { move in
+         self.isMoveLegal(move, forPlayer: self.currentPlayer)
       }
    }
 
@@ -322,14 +320,7 @@ public struct Game: GameProtocol {
    }
 
    public func legalMoveMaskForCurrentPlayer () -> [Bool] {
-      return self.legalMoveMask(forPlayer: self.currentPlayer)
-   }
-
-   public func legalMoveMask (forPlayer playerIndex: Int) -> [Bool] {
-      guard playerIndex < _legalMoveMasks.count else {
-         return []
-      }
-      return _legalMoveMasks[playerIndex]
+      return _currentPlayerLegalMoveMask
    }
 
    public var terminalCondition: GameTerminalCondition {
@@ -392,7 +383,7 @@ public struct Game: GameProtocol {
       precondition(self.validate(), "Game state is invalid")
       precondition(canonicalMoveIndex < self.canonicalMoveCount, "Canonical move index is out of bounds")
       precondition(canonicalMoveIndex >= 0, "Canonical move index is negative")
-      precondition(self.legalMoveMask(forPlayer: currentPlayer)[canonicalMoveIndex], "Move is not legal")
+      precondition(_currentPlayerLegalMoveMask[canonicalMoveIndex], "Move is not legal")
 
       let playerIndex = currentPlayer
       guard playerIndex < players.count else {
@@ -484,7 +475,8 @@ public struct Game: GameProtocol {
             phase = .normalAction
             currentTurn += 1  // Increment turn only when advancing to next player
          }
-      } else if phase == .discarding {
+      }
+      else if phase == .discarding {
          // After discarding, check if player is now at or below limit
          if players[playerIndex].gemCount <= Game.GEMS_PER_PLAYER_LIMIT {
             // Player is done discarding - advance to next player, return to normal phase
@@ -495,12 +487,8 @@ public struct Game: GameProtocol {
          // Otherwise stay in discarding phase with same player
       }
 
-      // Recompute legal move masks for all players
-      _legalMoveMasks = (0..<players.count).map { playerIndex in
-         _allMoves.map { move in
-            isMoveLegal(move, forPlayer: playerIndex)
-         }
-      }
+      // Recompute legal move mask for the current player
+      _currentPlayerLegalMoveMask = _allMoves.map { isMoveLegal($0, forPlayer: currentPlayer) }
    }
 
    // Encode game state as a fixed-size array of Float16
@@ -516,7 +504,8 @@ public struct Game: GameProtocol {
          let i = (self.currentPlayer + slot) % n
          if slot < n {
             encoded.append(contentsOf: self.players[i].encoding())
-         } else {
+         }
+         else {
             // Zero-padding for missing players
             encoded.append(contentsOf: Array(repeating: Float16(0), count: PlayerState.ENCODED_SIZE))
          }

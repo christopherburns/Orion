@@ -20,9 +20,8 @@ public protocol GameProtocol {
    var currentPlayer: Int { get }
 
    // Given the present game state, compute a boolean array of length canonicalMoveCount
-   // where each element is true if the move is legal for the given player
+   // where each element is true if the move is legal for the current player
    func legalMoveMaskForCurrentPlayer () -> [Bool]
-   func legalMoveMask (forPlayer playerIndex: Int) -> [Bool]
 
    // Apply a move to the game state. Move must be a legal and valid move for the
    // current game state. It is defined by the index in the game's canonical move ordering.
