@@ -248,8 +248,10 @@ public class PolicyValueNetwork: Module {
       // Save metadata as JSON
       let metadataURL = url.appendingPathComponent("metadata.json")
       let metadataEncoder = JSONEncoder()
+      metadataEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
       metadataEncoder.dateEncodingStrategy = .iso8601
-      let metadataData = try metadataEncoder.encode(metadata)
+      var metadataData = try metadataEncoder.encode(metadata)
+      metadataData.append(0x0A)  // trailing newline
       try metadataData.write(to: metadataURL)
 
       // Save architecture info (including dropout rate for reproducibility)
