@@ -58,8 +58,8 @@ Trains on generated data with Adam optimizer.
 - `-i` input data (file or directory), `-o` output model path
 - `-m` existing model to continue from, `-e` epochs, `-b` batch size
 - `-r` learning rate, `-w` weight decay, `-d` dropout rate
-- `-E` early stopping patience, `--min-policy-weight` (loser weight floor)
-- Policy loss: cross-entropy, value-weighted with configurable min weight
+- `-E` early stopping patience
+- Policy loss: cross-entropy against MCTS visit distribution
 - Value loss: MSE on [-1, 1] targets
 
 ### `orion play` — Play and evaluate
@@ -173,7 +173,7 @@ Orchestrates the generate → train → evaluate cycle:
 - LR decay: geometric per cycle (default 0.95×)
 - Commands logged to `evaluations/commands.log`
 
-Current defaults: 5000 initial games, 5000 games/cycle, 15 cycles, BS=128, LR=3e-4, WD=0.0, dropout=0.1, min-policy-weight=0.5 for self-play cycles (0.0 for cycle 1)
+Current defaults: 5000 initial games, 5000 games/cycle, 15 cycles, BS=128, LR=3e-4, WD=0.0, dropout=0.1
 
 ### Training Data Format
 Binary `.bin.lz4` files (LZ4-compressed):
@@ -182,11 +182,9 @@ Binary `.bin.lz4` files (LZ4-compressed):
 - Legacy `.gz` JSON format still loadable
 
 ### Loss Function
-- **Policy loss**: Cross-entropy with value weighting. Winner weight=1.0, loser weight=`minPolicyWeight` (0.0 for random data, 0.5 for self-play). Without this, self-play training causes catastrophic forgetting.
+- **Policy loss**: Cross-entropy between predicted distribution and MCTS visit distribution at each position. All examples weighted equally regardless of game outcome.
 - **Value loss**: MSE between predicted and actual outcome (±1 for win/loss, 0 for tie)
 - Combined: `policyWeight * policyLoss + valueWeight * valueLoss`
-
-**Note:** When minPolicyWeight=0.0, the reported loss is artificially halved because loser examples contribute 0 to the mean. A reported loss of ~1.3 actually represents ~2.6 cross-entropy on winner examples.
 
 ## Splendor Game Rules
 

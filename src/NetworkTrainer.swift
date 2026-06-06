@@ -26,7 +26,6 @@ public struct NetworkTrainer {
       opts.addOption("Network Trainer", "V", "value-loss-weight", "Weight for value loss (default: 1.0)")
       opts.addOption("Network Trainer", "E", "early-stopping", "Stop training if validation loss doesn't improve for N epochs (default: 0 = disabled)")
       opts.addOption("Network Trainer", "w", "weight-decay", "Weight decay (L2 regularization) strength (default: 0.0)")
-      opts.addOption("Network Trainer", "", "min-policy-weight", "Minimum policy weight for losing examples (default: 0.0, range 0-1)")
       opts.addOption("Network Trainer", "d", "dropout", "Dropout rate for trunk layers (default: 0.1, 0=disabled)")
    }
 
@@ -52,23 +51,13 @@ public struct NetworkTrainer {
 
 
    /// Compute policy loss (cross-entropy between predicted and target distributions)
-   /// Weighted by value targets with configurable minimum weight for losers.
    /// - Parameters:
    ///   - predicted: [batchSize, 48] logits
    ///   - target: [batchSize, 48] probabilities
-   ///   - valueWeights: [batchSize, 1] - value targets in [-1, 1] range
-   ///   - minWeight: Minimum weight for losing examples (0.0 = ignore losers, 1.0 = equal weight)
-   static func policyLoss (predicted: MLXArray, target: MLXArray, valueWeights: MLXArray, minWeight: Float = 0.0) -> Float {
+   static func policyLoss (predicted: MLXArray, target: MLXArray) -> Float {
       let logProbs = logSoftmax(predicted, axis: -1)
-      let perExampleLoss = -sum(target * logProbs, axis: -1)  // [batchSize]
-      // Map value [-1, 1] to weight [minWeight, 1.0]
-      //    value=+1.0 → weight=1.0 (always full weight for winners)
-      //    value=-1.0 → weight=minWeight (configurable for losers)
-      //    value=0.0  → weight=(1+minWeight)/2 (midpoint for ties)
-      let rawWeights = ((valueWeights + 1.0) / 2.0).squeezed(axis: -1)  // [0, 1]
-      let weights = rawWeights * (1.0 - minWeight) + minWeight  // [minWeight, 1.0]
-      let weightedLoss = perExampleLoss * weights  // [batchSize]
-      return Float(mean(weightedLoss).item(Float.self))
+      let perExampleLoss = -sum(target * logProbs, axis: -1)
+      return Float(mean(perExampleLoss).item(Float.self))
    }
 
    /// Compute value loss (MSE between predicted and target values)
@@ -88,8 +77,7 @@ public struct NetworkTrainer {
    static func computeValidationLoss (
       network: PolicyValueNetwork,
       validationExamples: [TrainingExample],
-      batchSize: Int,
-      minPolicyWeight: Float = 0.0) -> (policyLoss: Float, valueLoss: Float) {
+      batchSize: Int) -> (policyLoss: Float, valueLoss: Float) {
 
       var totalPolicyLoss: Float = 0.0
       var totalValueLoss: Float = 0.0
@@ -105,7 +93,7 @@ public struct NetworkTrainer {
          let valValueTargets = MLXArray(valBatch.map { $0.value }).reshaped([valBatch.count, 1])
 
          let (valPolicyLogits, valValuePred) = network.execute(valStates)
-         let valPolLoss = policyLoss(predicted: valPolicyLogits, target: valPolicyTargets, valueWeights: valValueTargets, minWeight: minPolicyWeight)
+         let valPolLoss = policyLoss(predicted: valPolicyLogits, target: valPolicyTargets)
          let valValLoss = valueLoss(predicted: valValuePred, target: valValueTargets)
 
          totalPolicyLoss += valPolLoss
@@ -126,10 +114,7 @@ public struct NetworkTrainer {
       policyTargets: MLXArray,
       valueTargets: MLXArray,
       policyWeight: Float,
-      valueWeight: Float,
-      minPolicyWeight: Float = 0.0) -> (policyLoss: Float, valueLoss: Float) {
-
-      let minPW = minPolicyWeight  // capture for closure
+      valueWeight: Float) -> (policyLoss: Float, valueLoss: Float) {
 
       // Create valueAndGrad function
       let vg = valueAndGrad(model: network) { model, _ in
@@ -138,11 +123,7 @@ public struct NetworkTrainer {
 
          // Compute losses as MLXArrays (needed for gradient computation)
          let logProbs = logSoftmax(p, axis: -1)
-         let perExampleLoss = -sum(policyTargets * logProbs, axis: -1)
-         let rawWeights = ((valueTargets + 1.0) / 2.0).squeezed(axis: -1)
-         let weights = rawWeights * (1.0 - minPW) + minPW
-         let weightedLoss = perExampleLoss * weights
-         let pl = mean(weightedLoss)
+         let pl = mean(-sum(policyTargets * logProbs, axis: -1))
 
          let diff = v - valueTargets
          let vl = mean(diff * diff)
@@ -158,7 +139,7 @@ public struct NetworkTrainer {
 
       // Forward pass again to get updated predictions for return value
       let (p, v) = network.execute(states)
-      let policyLossValue = policyLoss(predicted: p, target: policyTargets, valueWeights: valueTargets, minWeight: minPolicyWeight)
+      let policyLossValue = policyLoss(predicted: p, target: policyTargets)
       let valueLossValue = valueLoss(predicted: v, target: valueTargets)
 
       return (policyLoss: policyLossValue, valueLoss: valueLossValue)
@@ -196,7 +177,6 @@ public struct NetworkTrainer {
       valueWeight: Float = 1.0,
       weightDecay: Float = 0.0,
       earlyStoppingPatience: Int = 0,
-      minPolicyWeight: Float = 0.0,
       dropoutRate: Float = PolicyValueNetwork.DEFAULT_DROPOUT) throws {
 
       print("Loading training data from: \(inputPath)")
@@ -265,8 +245,7 @@ public struct NetworkTrainer {
                policyTargets: policyTargets,
                valueTargets: valueTargets,
                policyWeight: policyWeight,
-               valueWeight: valueWeight,
-               minPolicyWeight: minPolicyWeight)
+               valueWeight: valueWeight)
 
             epochPolicyLoss += policyLoss
             epochValueLoss += valueLoss
@@ -283,8 +262,7 @@ public struct NetworkTrainer {
          let avgValidationLosses = computeValidationLoss(
             network: network,
             validationExamples: validationExamples,
-            batchSize: batchSize,
-            minPolicyWeight: minPolicyWeight)
+            batchSize: batchSize)
 
          let validationLoss = avgValidationLosses.policyLoss * policyWeight + avgValidationLosses.valueLoss * valueWeight
 
@@ -377,7 +355,6 @@ public struct NetworkTrainer {
       let valueWeight = opts.get(option: "value-loss-weight", orElse: Float(1.0))
       let earlyStoppingPatience = opts.get(option: "early-stopping", orElse: 0)
       let weightDecay = opts.get(option: "weight-decay", orElse: Float(0.0))
-      let minPolicyWeight = opts.get(option: "min-policy-weight", orElse: Float(0.0))
       let dropoutRate = opts.get(option: "dropout", orElse: Float(PolicyValueNetwork.DEFAULT_DROPOUT))
 
       // Print configuration
@@ -394,7 +371,6 @@ public struct NetworkTrainer {
       print("  Policy weight:        \(policyWeight)")
       print("  Value weight:         \(valueWeight)")
       print("  Early stopping:       \(earlyStoppingPatience == 0 ? "disabled" : "\(earlyStoppingPatience) epochs")")
-      print("  Min policy wt:        \(minPolicyWeight)")
       print("  Dropout:              \(dropoutRate)")
       print("  Seed:                 \(seed)")
 
@@ -413,7 +389,6 @@ public struct NetworkTrainer {
          valueWeight: valueWeight,
          weightDecay: weightDecay,
          earlyStoppingPatience: earlyStoppingPatience,
-         minPolicyWeight: minPolicyWeight,
          dropoutRate: dropoutRate
       )
    }

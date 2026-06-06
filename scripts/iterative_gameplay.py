@@ -21,7 +21,6 @@ Options:
    --lr-decay R            Multiplicative LR decay per cycle (1.0 = no decay)      [default: 0.95]
    --weight-decay N        Weight decay rate                                       [default: 0.0]
    --eval-temp TEMP        Sampling temperature during evaluation (0=greedy)       [default: 0]
-   --min-policy-weight N   Min policy weight for losers (0=ignore, 1=equal)        [default: 0.5]
    --dropout N             Dropout rate for trunk layers (0=disabled)              [default: 0.1]
    --monte-carlo-samples N MCTS monteCarloSamples per move (0=disabled)            [default: 25]
    --c-puct N              MCTS exploration constant                               [default: 1.5]
@@ -76,7 +75,6 @@ class Config:
    lrDecay:           float
    weightDecay:       float
    evalTemp:          float
-   minPolicyWeight:   float
    dropout:           float
    monteCarloSamples: int
    cPuct:             float
@@ -155,7 +153,7 @@ def generateInitialData_HeuristicAgent (cfg: Config, outputPath: str) -> bool:
    return run(args, "generate-initial") == 0
 
 
-def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: float, prevModelPath: Optional[str] = None, minPolicyWeight: float = 0.0) -> bool:
+def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: float, prevModelPath: Optional[str] = None) -> bool:
    """Train (or fine-tune) a model on inputPath, saving weights to outputPath."""
    args = [
       cfg.binary, "train",
@@ -166,7 +164,6 @@ def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: floa
       "--learning-rate", str(learningRate),
       "--weight-decay", str(cfg.weightDecay),
       "--early-stopping", str(cfg.earlyStopping),
-      "--min-policy-weight", str(minPolicyWeight),
       "--dropout", str(cfg.dropout),
    ]
    if prevModelPath is not None:
@@ -271,7 +268,7 @@ def runFirstCycle (cfg: Config) -> str:
    print(f"\n=== Cycle 1: Training model ===")
    model = modelPath(cfg, 1)
    lr = cycleLearningRate(cfg, 1)
-   if not trainModel(cfg, trainingInput, model, learningRate=lr, minPolicyWeight=0.0):
+   if not trainModel(cfg, trainingInput, model, learningRate=lr):
       sys.exit(1)
 
    print(f"\n=== Cycle 1: Evaluating model vs random ===")
@@ -294,7 +291,7 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> str:
    lr = cycleLearningRate(cfg, cycle)
    print(f"Training model (continuing from previous cycle, LR={lr:.6f})...")
    trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.bin.lz4"
-   if not trainModel(cfg, trainingInput, currentModel, learningRate=lr, prevModelPath=f"{prevModel}/", minPolicyWeight=cfg.minPolicyWeight):
+   if not trainModel(cfg, trainingInput, currentModel, learningRate=lr, prevModelPath=f"{prevModel}/"):
       sys.exit(1)
 
    print("Evaluating model vs random...")
@@ -337,7 +334,6 @@ def configFromArgs (args: dict) -> Config:
       lrDecay            = float(args["--lr-decay"]),
       weightDecay        = float(args["--weight-decay"]),
       evalTemp           = float(args["--eval-temp"]),
-      minPolicyWeight    = float(args["--min-policy-weight"]),
       dropout            = float(args["--dropout"]),
       monteCarloSamples  = int(args["--monte-carlo-samples"]),
       cPuct              = float(args["--c-puct"]),
