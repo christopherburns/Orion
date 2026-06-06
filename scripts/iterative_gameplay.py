@@ -1,34 +1,38 @@
 #!/usr/bin/env python3
 """Iterative self-play training loop for Orion.
 
+Starts from an existing bootstrap model and runs N self-play cycles. Each cycle
+generates fresh data using the current champion, trains a new model from the
+prior cycle's weights, and gates acceptance on a win-rate threshold vs. the
+champion. Run scripts/bootstrap.sh first to produce an initial model.
+
 Usage:
    iterative_gameplay.py [options]
 
 Options:
-   --initial-data PATH     Path to initial training dataset (if set, skip random generation)
-   --initial-games N       Games to generate in the first cycle                    [default: 5000]
-   --games-per-cycle N     Games to generate in subsequent cycles                  [default: 5000]
-   --epochs N              Training epochs per cycle                               [default: 100]
-   --training-batch-size N Training batch size                                     [default: 128]
-   --generate-batch-size N Games to run in parallel during MCTS generation         [default: 128]
-   --cycles N              Total number of cycles to run                           [default: 15]
-   --eval-games N          Games to play when evaluating                           [default: 500]
-   --champion-threshold N  Min win rate vs previous to accept new model (0=off)    [default: 0.52]
-   --early-stopping N      Stop training after N epochs w/out improvement (0=off)  [default: 10]
-   --initial-temp TEMP     Sampling temperature for cycle 1                        [default: 1.5]
-   --final-temp TEMP       Sampling temperature for the last cycle                 [default: 0.5]
-   --learning-rate R       Learning rate for cycle 1                               [default: 0.0003]
-   --lr-decay R            Multiplicative LR decay per cycle (1.0 = no decay)      [default: 0.95]
-   --weight-decay N        Weight decay rate                                       [default: 0.0]
-   --eval-temp TEMP        Sampling temperature during evaluation (0=greedy)       [default: 0]
-   --dropout N             Dropout rate for trunk layers (0=disabled)              [default: 0.1]
-   --monte-carlo-samples N MCTS monteCarloSamples per move (0=disabled)            [default: 25]
-   --c-puct N              MCTS exploration constant                               [default: 1.5]
+   --initial-model PATH    Initial model to start self-play from                 [default: none]
+   --games-per-cycle N     Games to generate per cycle                           [default: 5000]
+   --epochs N              Training epochs per cycle                             [default: 100]
+   --training-batch-size N Training batch size                                   [default: 128]
+   --generate-batch-size N Games to run in parallel during MCTS generation       [default: 128]
+   --cycles N              Total number of cycles to run                         [default: 15]
+   --eval-games N          Games to play when evaluating                         [default: 500]
+   --champion-threshold N  Min win rate vs previous to accept new model (0=off)  [default: 0.52]
+   --early-stopping N      Stop training after N epochs w/out improvement (0=off)[default: 10]
+   --initial-temp TEMP     Sampling temperature for cycle 1                      [default: 1.5]
+   --final-temp TEMP       Sampling temperature for the last cycle               [default: 0.5]
+   --learning-rate R       Learning rate for cycle 1                             [default: 0.0003]
+   --lr-decay R            Multiplicative LR decay per cycle (1.0 = no decay)    [default: 0.95]
+   --weight-decay N        Weight decay rate                                     [default: 0.0]
+   --eval-temp TEMP        Sampling temperature during evaluation (0=greedy)     [default: 0.1]
+   --dropout N             Dropout rate for trunk layers (0=disabled)            [default: 0.1]
+   --monte-carlo-samples N MCTS monteCarloSamples per move (0=disabled)          [default: 25]
+   --c-puct N              MCTS exploration constant                             [default: 1.5]
    --accumulate-data       Train on all previous cycles' data, not just the latest
-   --data-dir DIR          Directory for generated training data                   [default: trainingdata]
-   --model-dir DIR         Directory for saved models                              [default: models]
-   --eval-dir DIR          Directory for evaluation results                        [default: evaluations]
-   --binary PATH           Path to the orion binary                                [default: .build/release/orion]
+   --data-dir DIR          Directory for generated training data                 [default: trainingdata]
+   --model-dir DIR         Directory for saved models                            [default: models]
+   --eval-dir DIR          Directory for evaluation results                      [default: evaluations]
+   --binary PATH           Path to the orion binary                              [default: .build/release/orion]
    -h --help               Show this help message
 """
 
@@ -53,14 +57,9 @@ from docopt import docopt
 #
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-   # 66  ./orion generate -g 1000 -o trainingdata/onehot_data -s 42
-   # 67  ./orion train -i trainingdata/onehot_data.gz -o models/onehot_model -e 40 --learning-rate 0.0003 --weight-decay 0.01 --early-stopping 8
-   # 68  ./orion play -n 100 -a models/onehot_model random
-
 @dataclass
 class Config:
-   initialData:       Optional[str]
-   initialGames:      int
+   initialModel:      str
    gamesPerCycle:     int
    epochs:            int
    trainingBatchSize: int
@@ -124,33 +123,6 @@ def generateData (cfg: Config, outputPath: str, agent: str, temperature: float) 
       args += ["--monte-carlo-samples", str(cfg.monteCarloSamples), "--c-puct", str(cfg.cPuct),
                "-b", str(cfg.generateBatchSize)]
    return run(args, "generate") == 0
-
-
-def generateInitialData_RandomAgent (cfg: Config, outputPath: str) -> bool:
-   """Play the first batch of games using the random agent.
-   MCTS is not used for cycle 1 — the random agent has no value head."""
-   args = [
-      cfg.binary, "generate",
-      "-o", outputPath,
-      "-n", str(cfg.initialGames),
-      "-a", "random",
-      "--monte-carlo-samples", str(cfg.monteCarloSamples),
-      "-t", f"{cfg.initialTemp:.2f}",
-   ]
-   return run(args, "generate-initial") == 0
-
-def generateInitialData_HeuristicAgent (cfg: Config, outputPath: str) -> bool:
-   """Play the first batch of games using the heuristic agent.
-   MCTS is heavily relied on for cycle 1 — the heuristic agent has a useful value head, but random policy head."""
-   args = [
-      cfg.binary, "generate",
-      "-o", outputPath,
-      "-n", str(cfg.initialGames),
-      "-a", "heuristic",
-      "--monte-carlo-samples", str(cfg.monteCarloSamples),
-      "-t", f"{cfg.initialTemp:.2f}",
-   ]
-   return run(args, "generate-initial") == 0
 
 
 def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: float, prevModelPath: Optional[str] = None) -> bool:
@@ -243,8 +215,9 @@ def modelPath (cfg: Config, cycle: int) -> str:
    return f"{cfg.modelDir}/model_c{cycleStr(cfg, cycle)}_e{cfg.epochs}_b{cfg.trainingBatchSize}"
 
 def dataPath (cfg: Config, cycle: int) -> str:
-   if cycle == 1:
-      return f"{cfg.dataDir}/data_r1_{cfg.initialGames}"
+   """Path for data generated by the model at the START of `cycle` (i.e., the
+   previous champion). Cycle 1's data is generated by the bootstrap model and
+   labelled c00."""
    return f"{cfg.dataDir}/data_c{cycleStr(cfg, cycle - 1)}_{cfg.gamesPerCycle}"
 
 def evalPath (cfg: Config, cycle: int, suffix: str = "") -> str:
@@ -253,43 +226,19 @@ def evalPath (cfg: Config, cycle: int, suffix: str = "") -> str:
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
-def runFirstCycle (cfg: Config) -> str:
-   """Bootstrap: use provided initial data or generate with random agent, then train first model."""
-   if cfg.initialData:
-      print(f"\n=== Cycle 1: Using provided training data ===")
-      trainingInput = cfg.initialData
-   else:
-      print(f"\n=== Cycle 1: Generating {cfg.initialGames} games with random agent ===")
-      data = dataPath(cfg, 1)
-      if not generateInitialData_HeuristicAgent(cfg, data):
-         sys.exit(1)
-      trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.bin.lz4"
-
-   print(f"\n=== Cycle 1: Training model ===")
-   model = modelPath(cfg, 1)
-   lr = cycleLearningRate(cfg, 1)
-   if not trainModel(cfg, trainingInput, model, learningRate=lr):
-      sys.exit(1)
-
-   print(f"\n=== Cycle 1: Evaluating model vs random ===")
-   evaluateVsRandom(cfg, f"{model}/", evalPath(cfg, 1))
-
-   return model
-
-
 def runCycle (cfg: Config, cycle: int, prevModel: str) -> str:
    """One self-play cycle: generate → train → evaluate."""
    temp = computeTemperature(cfg, cycle)
    print(f"\n=== Cycle {cycle} (temperature: {temp:.2f}) ===")
 
    data = dataPath(cfg, cycle)
-   print(f"Generating {cfg.gamesPerCycle} games with model from cycle {cycle - 1}...")
+   print(f"Generating {cfg.gamesPerCycle} games with {prevModel}...")
    if not generateData(cfg, data, f"{prevModel}/", temp):
       sys.exit(1)
 
    currentModel = modelPath(cfg, cycle)
    lr = cycleLearningRate(cfg, cycle)
-   print(f"Training model (continuing from previous cycle, LR={lr:.6f})...")
+   print(f"Training model (continuing from {prevModel}, LR={lr:.6f})...")
    trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.bin.lz4"
    if not trainModel(cfg, trainingInput, currentModel, learningRate=lr, prevModelPath=f"{prevModel}/"):
       sys.exit(1)
@@ -298,9 +247,8 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> str:
    evaluateVsRandom(cfg, f"{currentModel}/", evalPath(cfg, cycle))
 
    vsPrevFile = evalPath(cfg, cycle, "_vs_prev")
-   if os.path.isdir(f"{prevModel}/") or os.path.isdir(prevModel):
-      print("Evaluating model vs previous cycle...")
-      evaluateVsPrevious(cfg, f"{currentModel}/", f"{prevModel}/", vsPrevFile)
+   print(f"Evaluating model vs {prevModel}...")
+   evaluateVsPrevious(cfg, f"{currentModel}/", f"{prevModel}/", vsPrevFile)
 
    # Champion gating: only accept the new model if it clears the win-rate threshold
    if cfg.championThreshold > 0:
@@ -318,8 +266,7 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> str:
 
 def configFromArgs (args: dict) -> Config:
    return Config(
-      initialData        = args["--initial-data"],
-      initialGames       = int(args["--initial-games"]),
+      initialModel       = args["--initial-model"],
       gamesPerCycle      = int(args["--games-per-cycle"]),
       epochs             = int(args["--epochs"]),
       trainingBatchSize  = int(args["--training-batch-size"]),
@@ -349,6 +296,11 @@ def main ():
    global _command_log
    cfg = configFromArgs(docopt(__doc__))
 
+   if not os.path.isdir(cfg.initialModel):
+      print(f"Error: initial model not found at {cfg.initialModel}", file=sys.stderr)
+      print(f"Run scripts/bootstrap.sh first, or pass --initial-model PATH.", file=sys.stderr)
+      sys.exit(1)
+
    os.makedirs(cfg.dataDir,  exist_ok=True)
    os.makedirs(cfg.modelDir, exist_ok=True)
    os.makedirs(cfg.evalDir,  exist_ok=True)
@@ -357,9 +309,8 @@ def main ():
    with open(_command_log, "w") as f:
       f.write(f"# Orion training run — {__import__('datetime').datetime.now().isoformat()}\n")
 
-   currentModel = runFirstCycle(cfg)
-
-   for cycle in range(2, cfg.maxCycles + 1):
+   currentModel = cfg.initialModel
+   for cycle in range(1, cfg.maxCycles + 1):
       currentModel = runCycle(cfg, cycle, currentModel)
 
    print(f"\n=== Training complete! Final model: {currentModel} ===")
