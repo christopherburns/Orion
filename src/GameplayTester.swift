@@ -29,6 +29,56 @@ public struct GameplayTester {
       opts.addOption("Gameplay Tester", "", "max-turns", "Maximum turns per game before timeout (default: 1000)")
       opts.addOption("Gameplay Tester", "b", "batch-size", "Number of games to run in parallel (default: 64)")
       opts.addOption("Gameplay Tester", "", "serial", "Force single-threaded evaluation (default: concurrent)", requireArgument: false)
+      opts.addOption("Gameplay Tester", "", "report-json", "Write a structured JSON report of inputs and results to this path")
+   }
+
+
+   // MARK: - Structured report
+
+   struct PlayReport: Encodable {
+      let schemaVersion: Int
+      let command: String
+      let startedAt: String
+      let completedAt: String
+      let elapsedSeconds: Double
+      let parameters: Parameters
+      let results: Results
+
+      struct AgentSpec: Encodable {
+         let spec: String
+         let kind: String
+         let label: String
+      }
+
+      struct Parameters: Encodable {
+         let agents: [AgentSpec]
+         let gameCount: Int
+         let playerCount: Int
+         let temperature: Float
+         let maxTurns: Int
+         let seed: UInt64
+         let batchSize: Int
+      }
+
+      struct PerPlayerResult: Encodable {
+         let index: Int
+         let spec: String
+         let kind: String
+         let label: String
+         let wins: Int
+         let winRateOverAll: Double
+         let winRateOverDecisive: Double
+      }
+
+      struct Results: Encodable {
+         let totalGames: Int
+         let decisiveGames: Int
+         let tiedGames: Int
+         let timedOutGames: Int
+         let totalTurns: Int
+         let avgTurnsPerGame: Double
+         let perPlayer: [PerPlayerResult]
+      }
    }
 
    /// Convert logits to probabilities by masking illegal moves and applying softmax
@@ -384,6 +434,8 @@ public struct GameplayTester {
       let maxTurns = opts.get(option: "max-turns", orElse: 1000)
       let batchSize = opts.get(option: "batch-size", orElse: 64)
       let serial = opts.wasProvided(option: "serial")
+      let reportPath: String? = opts.get(option: "report-json")
+      let startDate = Date()
 
       // Print configuration
       let agentDesc = agentSpecs.isEmpty ? "random" : agentSpecs.joined(separator: ", ")
@@ -492,6 +544,54 @@ public struct GameplayTester {
       print("Tied games: \(tiedCount)")
       if timedOutCount > 0 {
          print("Timed out:  \(timedOutCount) games (exceeded \(maxTurns) turns)")
+      }
+
+      if let reportPath = reportPath {
+         let endDate = Date()
+         let decisiveCount = gameCount - tiedCount - timedOutCount
+         let resolvedSpecs: [String] = (0..<playerCount).map { i in
+            i < agentSpecs.count ? agentSpecs[i] : "random"
+         }
+         let agentSpecsForReport: [PlayReport.AgentSpec] = resolvedSpecs.map { s in
+            PlayReport.AgentSpec(
+               spec: s, kind: Report.agentKind(spec: s), label: Report.agentLabel(spec: s))
+         }
+         let perPlayer: [PlayReport.PerPlayerResult] = (0..<playerCount).map { i in
+            let s = resolvedSpecs[i]
+            let wins = playerWinCounts[i] ?? 0
+            return PlayReport.PerPlayerResult(
+               index: i,
+               spec:  s,
+               kind:  Report.agentKind(spec: s),
+               label: Report.agentLabel(spec: s),
+               wins:  wins,
+               winRateOverAll:      gameCount > 0     ? Double(wins) / Double(gameCount)     : 0,
+               winRateOverDecisive: decisiveCount > 0 ? Double(wins) / Double(decisiveCount) : 0)
+         }
+         let report = PlayReport(
+            schemaVersion:  Report.SCHEMA_VERSION,
+            command:        "play",
+            startedAt:      Report.timestamp(startDate),
+            completedAt:    Report.timestamp(endDate),
+            elapsedSeconds: endDate.timeIntervalSince(startDate),
+            parameters: PlayReport.Parameters(
+               agents:      agentSpecsForReport,
+               gameCount:   gameCount,
+               playerCount: playerCount,
+               temperature: temperature,
+               maxTurns:    maxTurns,
+               seed:        seed,
+               batchSize:   batchSize),
+            results: PlayReport.Results(
+               totalGames:      gameCount,
+               decisiveGames:   decisiveCount,
+               tiedGames:       tiedCount,
+               timedOutGames:   timedOutCount,
+               totalTurns:      totalTurnCount,
+               avgTurnsPerGame: gameCount > 0 ? Double(totalTurnCount) / Double(gameCount) : 0,
+               perPlayer:       perPlayer))
+         try Report.write(report, to: reportPath)
+         print("Report written to: \(reportPath)")
       }
    }
 }

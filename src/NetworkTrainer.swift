@@ -14,7 +14,7 @@ public struct NetworkTrainer {
    static func registerOptions (opts: OptionParser) {
       opts.addOption("Network Trainer", "i", "input", "Input training data file or directory (required)")
       opts.addOption("Network Trainer", "m", "model", "Path to input model file to continue training (default: create new untrained model)")
-      opts.addOption("Network Trainer", "o", "output", "Output path for trained model (default: models/model_TIMESTAMP.mlx)")
+      opts.addOption("Network Trainer", "o", "output", "Output path for trained model (default: models/model_TIMESTAMP)")
       opts.addOption("Network Trainer", "s", "seed", "Random seed for reproducibility (default: random)")
       opts.addOption("Network Trainer", "b", "batch-size", "Batch size for training (default: 256)")
       opts.addOption("Network Trainer", "e", "epochs", "Number of training epochs (default: 10)")
@@ -27,6 +27,73 @@ public struct NetworkTrainer {
       opts.addOption("Network Trainer", "E", "early-stopping", "Stop training if validation loss doesn't improve for N epochs (default: 0 = disabled)")
       opts.addOption("Network Trainer", "w", "weight-decay", "Weight decay (L2 regularization) strength (default: 0.0)")
       opts.addOption("Network Trainer", "d", "dropout", "Dropout rate for trunk layers (default: 0.1, 0=disabled)")
+      opts.addOption("Network Trainer", "", "report-json", "Write a structured JSON report of inputs and results to this path")
+   }
+
+
+   // MARK: - Structured report
+
+   public struct EpochRecord: Encodable {
+      public let epoch: Int
+      public let trainPolicyLoss: Float
+      public let trainValueLoss: Float
+      public let valPolicyLoss: Float
+      public let valValueLoss: Float
+      public let isBest: Bool
+   }
+
+   public struct TrainStats {
+      public let trainingExamples: Int
+      public let validationExamples: Int
+      public let epochsCompleted: Int
+      public let earlyStopped: Bool
+      public let bestEpoch: Int
+      public let bestValidationLoss: Float
+      public let bestValidationPolicyLoss: Float
+      public let bestValidationValueLoss: Float
+      public let savedModelPath: String?
+      public let epochs: [EpochRecord]
+   }
+
+   struct TrainReport: Encodable {
+      let schemaVersion: Int
+      let command: String
+      let startedAt: String
+      let completedAt: String
+      let elapsedSeconds: Double
+      let parameters: Parameters
+      let results: Results
+
+      struct Parameters: Encodable {
+         let input: String
+         let modelInput: String?
+         let output: String?
+         let seed: UInt64
+         let epochs: Int
+         let batchSize: Int
+         let learningRate: Float
+         let learningRateDecay: Float
+         let validationSplit: Float
+         let optimizer: String
+         let policyWeight: Float
+         let valueWeight: Float
+         let weightDecay: Float
+         let earlyStoppingPatience: Int
+         let dropout: Float
+      }
+
+      struct Results: Encodable {
+         let trainingExamples: Int
+         let validationExamples: Int
+         let epochsCompleted: Int
+         let earlyStopped: Bool
+         let bestEpoch: Int
+         let bestValidationLoss: Float
+         let bestValidationPolicyLoss: Float
+         let bestValidationValueLoss: Float
+         let savedModelPath: String?
+         let epochs: [EpochRecord]
+      }
    }
 
    /// Load or create a PolicyValueNetwork with metadata
@@ -162,6 +229,7 @@ public struct NetworkTrainer {
    }
 
    /// Train a model programmatically (without parsing command-line args)
+   @discardableResult
    public static func trainModel (
       inputPath: String,
       modelPath: String?,
@@ -177,7 +245,7 @@ public struct NetworkTrainer {
       valueWeight: Float = 1.0,
       weightDecay: Float = 0.0,
       earlyStoppingPatience: Int = 0,
-      dropoutRate: Float = PolicyValueNetwork.DEFAULT_DROPOUT) throws {
+      dropoutRate: Float = PolicyValueNetwork.DEFAULT_DROPOUT) throws -> TrainStats {
 
       print("Loading training data from: \(inputPath)")
       let dataset = try TrainingDataset.load(from: inputPath)
@@ -205,11 +273,16 @@ public struct NetworkTrainer {
       // Training loop
       print("\nStarting training...")
       var bestValidationLoss = Float.infinity
+      var bestPolicyComponent: Float = .infinity
+      var bestValueComponent: Float = .infinity
       var epochLosses: [Float] = []
+      var epochRecords: [EpochRecord] = []
       var epochsWithoutImprovement = 0
       var bestModelEpoch = 0
       var bestModelMetadata: ModelMetadata? = nil  // Metadata for best model
       var bestNetwork: PolicyValueNetwork? = nil  // Keep best model copy in memory
+      var earlyStopped = false
+      var lastCompletedEpoch = 0
 
       let optimizer = createOptimizer(name: optimizerName, learningRate: learningRate, weightDecay: weightDecay)
 
@@ -269,9 +342,21 @@ public struct NetworkTrainer {
          let bestTag = validationLoss < bestValidationLoss ? "[Best Yet]" : ""
          print("Epoch \(epoch)/\(epochs): Train = \(String(format: "%5.3f", avgEpochPolicyLoss)) / \(String(format: "%5.3f", avgEpochValueLoss)), Val = \(String(format: "%5.3f", avgValidationLosses.policyLoss)) / \(String(format: "%5.3f", avgValidationLosses.valueLoss)) \(bestTag)")
 
+         let isBestThisEpoch = validationLoss < bestValidationLoss
+         epochRecords.append(EpochRecord(
+            epoch:           epoch,
+            trainPolicyLoss: avgEpochPolicyLoss,
+            trainValueLoss:  avgEpochValueLoss,
+            valPolicyLoss:   avgValidationLosses.policyLoss,
+            valValueLoss:    avgValidationLosses.valueLoss,
+            isBest:          isBestThisEpoch))
+         lastCompletedEpoch = epoch
+
          // Track best model - save to temp file when found (we'll copy it at the end)
-         if validationLoss < bestValidationLoss {
+         if isBestThisEpoch {
             bestValidationLoss = validationLoss
+            bestPolicyComponent = avgValidationLosses.policyLoss
+            bestValueComponent = avgValidationLosses.valueLoss
             epochsWithoutImprovement = 0
             bestModelEpoch = epoch
             bestNetwork = network.clone() // Clone the network to keep a true copy in memory
@@ -293,6 +378,7 @@ public struct NetworkTrainer {
          if earlyStoppingPatience > 0 && epochsWithoutImprovement >= earlyStoppingPatience {
             print("\nEarly stopping triggered: validation loss hasn't improved for \(earlyStoppingPatience) epochs")
             print("Best validation loss: \(String(format: "%.6f", bestValidationLoss)) at epoch \(bestModelEpoch)")
+            earlyStopped = true
             break
          }
       } // loop over epochs
@@ -329,6 +415,18 @@ public struct NetworkTrainer {
             print("Training stopped early due to no improvement.")
          }
       }
+
+      return TrainStats(
+         trainingExamples:         trainingExamples.count,
+         validationExamples:       validationExamples.count,
+         epochsCompleted:          lastCompletedEpoch,
+         earlyStopped:             earlyStopped,
+         bestEpoch:                bestModelEpoch,
+         bestValidationLoss:       bestValidationLoss,
+         bestValidationPolicyLoss: bestPolicyComponent,
+         bestValidationValueLoss:  bestValueComponent,
+         savedModelPath:           outputPath,
+         epochs:                   epochRecords)
    }
 
    public static func main () throws {
@@ -343,7 +441,8 @@ public struct NetworkTrainer {
       }
 
       let modelPath = opts.get(option: "model") as String?
-      let outputPath = opts.get(option: "output") as String?
+      let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+      let outputPath = opts.get(option: "output", orElse: "models/model_\(timestamp)")
       let seed = opts.get(option: "seed", orElse: UInt64(42))
       let batchSize = opts.get(option: "batch-size", orElse: 256)
       let epochs = opts.get(option: "epochs", orElse: 10)
@@ -356,11 +455,12 @@ public struct NetworkTrainer {
       let earlyStoppingPatience = opts.get(option: "early-stopping", orElse: 0)
       let weightDecay = opts.get(option: "weight-decay", orElse: Float(0.0))
       let dropoutRate = opts.get(option: "dropout", orElse: Float(PolicyValueNetwork.DEFAULT_DROPOUT))
+      let reportPath: String? = opts.get(option: "report-json")
 
       // Print configuration
       print("Configuration:")
       print("  Input:                \(inputPath)")
-      print("  Output:               \(outputPath ?? "(none)")")
+      print("  Output:               \(outputPath)")
       print("  Model:                \(modelPath ?? "(new)")")
       print("  Epochs:               \(epochs)")
       print("  Batch size:           \(batchSize)")
@@ -374,7 +474,8 @@ public struct NetworkTrainer {
       print("  Dropout:              \(dropoutRate)")
       print("  Seed:                 \(seed)")
 
-      try trainModel(
+      let startDate = Date()
+      let stats = try trainModel(
          inputPath: inputPath,
          modelPath: modelPath,
          outputPath: outputPath,
@@ -391,6 +492,45 @@ public struct NetworkTrainer {
          earlyStoppingPatience: earlyStoppingPatience,
          dropoutRate: dropoutRate
       )
+      let endDate = Date()
+
+      if let reportPath = reportPath {
+         let report = TrainReport(
+            schemaVersion:  Report.SCHEMA_VERSION,
+            command:        "train",
+            startedAt:      Report.timestamp(startDate),
+            completedAt:    Report.timestamp(endDate),
+            elapsedSeconds: endDate.timeIntervalSince(startDate),
+            parameters: TrainReport.Parameters(
+               input:                 inputPath,
+               modelInput:            modelPath,
+               output:                outputPath,
+               seed:                  seed,
+               epochs:                epochs,
+               batchSize:             batchSize,
+               learningRate:          learningRate,
+               learningRateDecay:     learningRateDecay,
+               validationSplit:       validationSplit,
+               optimizer:             optimizerName,
+               policyWeight:          policyWeight,
+               valueWeight:           valueWeight,
+               weightDecay:           weightDecay,
+               earlyStoppingPatience: earlyStoppingPatience,
+               dropout:               dropoutRate),
+            results: TrainReport.Results(
+               trainingExamples:         stats.trainingExamples,
+               validationExamples:       stats.validationExamples,
+               epochsCompleted:          stats.epochsCompleted,
+               earlyStopped:             stats.earlyStopped,
+               bestEpoch:                stats.bestEpoch,
+               bestValidationLoss:       stats.bestValidationLoss,
+               bestValidationPolicyLoss: stats.bestValidationPolicyLoss,
+               bestValidationValueLoss:  stats.bestValidationValueLoss,
+               savedModelPath:           stats.savedModelPath,
+               epochs:                   stats.epochs))
+         try Report.write(report, to: reportPath)
+         print("Report written to: \(reportPath)")
+      }
    }
 }
 

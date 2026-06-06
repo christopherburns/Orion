@@ -6,8 +6,13 @@ generates fresh data using the current champion, trains a new model from the
 prior cycle's weights, and gates acceptance on a win-rate threshold vs. the
 champion. Run scripts/bootstrap.sh first to produce an initial model.
 
+All outputs for this run land under RUN_DIR (created if missing): generated
+training data under RUN_DIR/trainingdata/, saved models under RUN_DIR/models/,
+per-call reports as RUN_DIR/cycle_NN_*.json, and the master aggregate as
+RUN_DIR/run.json. The master file is rewritten atomically after every cycle.
+
 Usage:
-   iterative_gameplay.py [options]
+   iterative_gameplay.py RUN_DIR [options]
 
 Options:
    --initial-model PATH    Initial model to start self-play from                 [default: none]
@@ -29,19 +34,16 @@ Options:
    --monte-carlo-samples N MCTS monteCarloSamples per move (0=disabled)          [default: 25]
    --c-puct N              MCTS exploration constant                             [default: 1.5]
    --accumulate-data       Train on all previous cycles' data, not just the latest
-   --data-dir DIR          Directory for generated training data                 [default: trainingdata]
-   --model-dir DIR         Directory for saved models                            [default: models]
-   --eval-dir DIR          Directory for evaluation results                      [default: evaluations]
    --binary PATH           Path to the orion binary                              [default: .build/release/orion]
    -h --help               Show this help message
 """
 
+import datetime
+import json
 import os
-import re
-import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Optional
 
 from docopt import docopt
@@ -59,6 +61,7 @@ from docopt import docopt
 
 @dataclass
 class Config:
+   runDir:            str
    initialModel:      str
    gamesPerCycle:     int
    epochs:            int
@@ -78,9 +81,6 @@ class Config:
    monteCarloSamples: int
    cPuct:             float
    accumulateData:    bool
-   dataDir:           str
-   modelDir:          str
-   evalDir:           str
    binary:            str
 
 
@@ -99,19 +99,39 @@ def _logCommand (args: list[str], suffix: str = ""):
       with open(_command_log, "a") as f:
          f.write(cmd + "\n")
 
-def run (args: list[str], label: str) -> int:
-   """Run a subprocess, streaming its output. Returns exit code."""
-   _logCommand(args)
-   result = subprocess.run(args)
+
+def writeJsonAtomic (path: str, obj) -> None:
+   """Atomic JSON write: temp file + rename."""
+   os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+   tmp = path + ".tmp"
+   with open(tmp, "w") as f:
+      json.dump(obj, f, indent=2, sort_keys=True)
+   os.replace(tmp, path)
+
+
+def readJson (path: str) -> dict:
+   with open(path) as f:
+      return json.load(f)
+
+
+def runOrion (args: list[str], label: str, reportPath: str) -> Optional[dict]:
+   """Run an orion subcommand with --report-json and return the parsed report dict.
+   Returns None if the subprocess failed or didn't produce the report file."""
+   fullArgs = args + ["--report-json", reportPath]
+   _logCommand(fullArgs)
+   result = subprocess.run(fullArgs)
    if result.returncode != 0:
       print(f"[ERROR] '{label}' exited with code {result.returncode}", file=sys.stderr)
-   return result.returncode
+      return None
+   if not os.path.exists(reportPath):
+      print(f"[ERROR] '{label}' did not produce report at {reportPath}", file=sys.stderr)
+      return None
+   return readJson(reportPath)
 
 
-# ── Step functions ─────────────────────────────────────────────────────────────
+# ── Step functions (each returns the structured report dict, or None on failure) ─
 
-def generateData (cfg: Config, outputPath: str, agent: str, temperature: float) -> bool:
-   """Play games using the given agent and write training data to outputPath."""
+def generateData (cfg: Config, outputPath: str, agent: str, temperature: float, reportPath: str) -> Optional[dict]:
    args = [
       cfg.binary, "generate",
       "-o", outputPath,
@@ -122,11 +142,11 @@ def generateData (cfg: Config, outputPath: str, agent: str, temperature: float) 
    if cfg.monteCarloSamples > 0:
       args += ["--monte-carlo-samples", str(cfg.monteCarloSamples), "--c-puct", str(cfg.cPuct),
                "-b", str(cfg.generateBatchSize)]
-   return run(args, "generate") == 0
+   return runOrion(args, "generate", reportPath)
 
 
-def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: float, prevModelPath: Optional[str] = None) -> bool:
-   """Train (or fine-tune) a model on inputPath, saving weights to outputPath."""
+def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: float,
+                prevModelPath: Optional[str], reportPath: str) -> Optional[dict]:
    args = [
       cfg.binary, "train",
       "-i", inputPath,
@@ -140,64 +160,24 @@ def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: floa
    ]
    if prevModelPath is not None:
       args += ["-m", prevModelPath]
-   return run(args, "train") == 0
+   return runOrion(args, "train", reportPath)
+
+
+def evaluatePlay (cfg: Config, agentSpecs: list[str], reportPath: str) -> Optional[dict]:
+   args = [
+      cfg.binary, "play",
+      "-n", str(cfg.evalGames),
+      "-a", *agentSpecs,
+      "-t", f"{cfg.evalTemp:.2f}",
+   ]
+   return runOrion(args, "play", reportPath)
 
 
 def cycleLearningRate (cfg: Config, cycle: int) -> float:
-   """Geometric decay: LR halves (or scales by lrDecay) each cycle."""
    return cfg.learningRate * (cfg.lrDecay ** (cycle - 1))
 
 
-def evaluateVsRandom (cfg: Config, modelPath: str, outputFile: str) -> bool:
-   """Evaluate modelPath against the random agent, writing results to outputFile."""
-   args = [
-      cfg.binary, "play",
-      "-n", str(cfg.evalGames),
-      "-a", modelPath, "random",
-      "-t", f"{cfg.evalTemp:.2f}",
-   ]
-   _logCommand(args, f"> {outputFile}")
-   with open(outputFile, "w") as f:
-      result = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT)
-   print(f"Evaluation results saved to {outputFile}")
-   return result.returncode == 0
-
-
-def evaluateVsPrevious (cfg: Config, modelPath: str, prevModelPath: str, outputFile: str) -> bool:
-   """Evaluate modelPath against prevModelPath, writing results to outputFile."""
-   args = [
-      cfg.binary, "play",
-      "-n", str(cfg.evalGames),
-      "-a", modelPath, prevModelPath,
-      "-t", f"{cfg.evalTemp:.2f}",
-   ]
-   _logCommand(args, f"> {outputFile}")
-   with open(outputFile, "w") as f:
-      result = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT)
-   print(f"Evaluation results saved to {outputFile}")
-   return result.returncode == 0
-
-
-# ── Evaluation parsing ─────────────────────────────────────────────────────────
-
-def parseWinRate (evalFile: str, playerIndex: int = 0) -> Optional[float]:
-   """Parse win rate for a player from an orion play output file. Returns None if parsing fails."""
-   try:
-      with open(evalFile) as f:
-         for line in f:
-            if f"Player {playerIndex}" in line and "won" in line:
-               match = re.search(r'\((\d+\.?\d*)%\)', line)
-               if match:
-                  return float(match.group(1)) / 100.0
-   except (FileNotFoundError, ValueError):
-      pass
-   return None
-
-
-# ── Temperature schedule ───────────────────────────────────────────────────────
-
 def computeTemperature (cfg: Config, cycle: int) -> float:
-   """Linear decay from initialTemp (cycle 1) to finalTemp (cycle maxCycles)."""
    if cfg.maxCycles <= 1:
       return cfg.finalTemp
    progress = (cycle - 1) / (cfg.maxCycles - 1)
@@ -207,65 +187,91 @@ def computeTemperature (cfg: Config, cycle: int) -> float:
 # ── Path helpers ───────────────────────────────────────────────────────────────
 
 def cycleStr (cfg: Config, cycle: int) -> str:
-   """Zero-padded cycle number wide enough for cfg.maxCycles."""
    width = len(str(cfg.maxCycles))
    return str(cycle).zfill(width)
 
 def modelPath (cfg: Config, cycle: int) -> str:
-   return f"{cfg.modelDir}/model_c{cycleStr(cfg, cycle)}_e{cfg.epochs}_b{cfg.trainingBatchSize}"
+   return f"{cfg.runDir}/models/model_c{cycleStr(cfg, cycle)}_e{cfg.epochs}_b{cfg.trainingBatchSize}"
 
 def dataPath (cfg: Config, cycle: int) -> str:
-   """Path for data generated by the model at the START of `cycle` (i.e., the
-   previous champion). Cycle 1's data is generated by the bootstrap model and
-   labelled c00."""
-   return f"{cfg.dataDir}/data_c{cycleStr(cfg, cycle - 1)}_{cfg.gamesPerCycle}"
+   """Path for data generated by the model at the START of `cycle` (the previous
+   champion). Cycle 1's data is generated by the bootstrap model and labelled c00."""
+   return f"{cfg.runDir}/trainingdata/data_c{cycleStr(cfg, cycle - 1)}_{cfg.gamesPerCycle}"
 
-def evalPath (cfg: Config, cycle: int, suffix: str = "") -> str:
-   return f"{cfg.evalDir}/eval_cycle{cycleStr(cfg, cycle)}{suffix}.txt"
+def reportFile (cfg: Config, cycle: int, kind: str) -> str:
+   return f"{cfg.runDir}/cycle_{cycleStr(cfg, cycle)}_{kind}.json"
+
+def masterFile (cfg: Config) -> str:
+   return f"{cfg.runDir}/run.json"
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
-def runCycle (cfg: Config, cycle: int, prevModel: str) -> str:
-   """One self-play cycle: generate → train → evaluate."""
+def runCycle (cfg: Config, cycle: int, prevModel: str) -> tuple[str, dict]:
+   """One self-play cycle. Returns (next champion path, cycle entry dict for the master record)."""
    temp = computeTemperature(cfg, cycle)
-   print(f"\n=== Cycle {cycle} (temperature: {temp:.2f}) ===")
+   lr = cycleLearningRate(cfg, cycle)
+   print(f"\n=== Cycle {cycle} (temperature: {temp:.2f}, LR: {lr:.6f}) ===")
 
    data = dataPath(cfg, cycle)
+   currentModel = modelPath(cfg, cycle)
+
    print(f"Generating {cfg.gamesPerCycle} games with {prevModel}...")
-   if not generateData(cfg, data, f"{prevModel}/", temp):
+   generateReport = generateData(cfg, data, f"{prevModel}/", temp, reportFile(cfg, cycle, "generate"))
+   if generateReport is None:
       sys.exit(1)
 
-   currentModel = modelPath(cfg, cycle)
-   lr = cycleLearningRate(cfg, cycle)
-   print(f"Training model (continuing from {prevModel}, LR={lr:.6f})...")
-   trainingInput = cfg.dataDir if cfg.accumulateData else f"{data}.bin.lz4"
-   if not trainModel(cfg, trainingInput, currentModel, learningRate=lr, prevModelPath=f"{prevModel}/"):
+   print(f"Training model (continuing from {prevModel})...")
+   trainingInput = f"{cfg.runDir}/trainingdata" if cfg.accumulateData else f"{data}.bin.lz4"
+   trainReport = trainModel(cfg, trainingInput, currentModel, lr,
+                            prevModelPath=f"{prevModel}/",
+                            reportPath=reportFile(cfg, cycle, "train"))
+   if trainReport is None:
       sys.exit(1)
 
    print("Evaluating model vs random...")
-   evaluateVsRandom(cfg, f"{currentModel}/", evalPath(cfg, cycle))
+   evalRandomReport = evaluatePlay(cfg, [f"{currentModel}/", "random"],
+                                   reportFile(cfg, cycle, "eval_vs_random"))
+   if evalRandomReport is None:
+      sys.exit(1)
 
-   vsPrevFile = evalPath(cfg, cycle, "_vs_prev")
    print(f"Evaluating model vs {prevModel}...")
-   evaluateVsPrevious(cfg, f"{currentModel}/", f"{prevModel}/", vsPrevFile)
+   evalPrevReport = evaluatePlay(cfg, [f"{currentModel}/", f"{prevModel}/"],
+                                 reportFile(cfg, cycle, "eval_vs_prev"))
+   if evalPrevReport is None:
+      sys.exit(1)
 
-   # Champion gating: only accept the new model if it clears the win-rate threshold
+   # Champion gating: read win rate directly from the structured report.
+   winRateVsPrev = evalPrevReport["results"]["perPlayer"][0]["winRateOverDecisive"]
+   accepted = True
    if cfg.championThreshold > 0:
-      winRate = parseWinRate(vsPrevFile)
-      if winRate is None:
-         print("Warning: could not parse vs-prev win rate, accepting new model by default")
-      elif winRate < cfg.championThreshold:
-         print(f"New model win rate {winRate:.1%} < threshold {cfg.championThreshold:.1%} — keeping previous champion")
-         return prevModel
+      if winRateVsPrev < cfg.championThreshold:
+         print(f"New model win rate {winRateVsPrev:.1%} < threshold {cfg.championThreshold:.1%} — keeping previous champion")
+         accepted = False
       else:
-         print(f"New model win rate {winRate:.1%} >= threshold {cfg.championThreshold:.1%} — accepting new champion")
+         print(f"New model win rate {winRateVsPrev:.1%} >= threshold {cfg.championThreshold:.1%} — accepting new champion")
 
-   return currentModel
+   cycleEntry = {
+      "cycleIndex":        cycle,
+      "previousModel":     prevModel,
+      "trainedModel":      currentModel,
+      "temperature":       temp,
+      "learningRate":      lr,
+      "winRateVsPrev":     winRateVsPrev,
+      "championAccepted":  accepted,
+      "generate":          generateReport,
+      "train":             trainReport,
+      "evalVsRandom":      evalRandomReport,
+      "evalVsPrev":        evalPrevReport,
+   }
+
+   nextChampion = currentModel if accepted else prevModel
+   return nextChampion, cycleEntry
 
 
 def configFromArgs (args: dict) -> Config:
    return Config(
+      runDir             = args["RUN_DIR"],
       initialModel       = args["--initial-model"],
       gamesPerCycle      = int(args["--games-per-cycle"]),
       epochs             = int(args["--epochs"]),
@@ -285,9 +291,6 @@ def configFromArgs (args: dict) -> Config:
       monteCarloSamples  = int(args["--monte-carlo-samples"]),
       cPuct              = float(args["--c-puct"]),
       accumulateData     = bool(args["--accumulate-data"]),
-      dataDir            = args["--data-dir"],
-      modelDir           = args["--model-dir"],
-      evalDir            = args["--eval-dir"],
       binary             = args["--binary"],
    )
 
@@ -301,20 +304,34 @@ def main ():
       print(f"Run scripts/bootstrap.sh first, or pass --initial-model PATH.", file=sys.stderr)
       sys.exit(1)
 
-   os.makedirs(cfg.dataDir,  exist_ok=True)
-   os.makedirs(cfg.modelDir, exist_ok=True)
-   os.makedirs(cfg.evalDir,  exist_ok=True)
+   os.makedirs(cfg.runDir,                            exist_ok=True)
+   os.makedirs(os.path.join(cfg.runDir, "trainingdata"), exist_ok=True)
+   os.makedirs(os.path.join(cfg.runDir, "models"),       exist_ok=True)
 
-   _command_log = "log.txt"
+   _command_log = f"{cfg.runDir}/commands.log"
    with open(_command_log, "w") as f:
-      f.write(f"# Orion training run — {__import__('datetime').datetime.now().isoformat()}\n")
+      f.write(f"# Orion training run — {datetime.datetime.now().isoformat()}\n")
+
+   master = {
+      "schemaVersion":  1,
+      "type":           "iterativeRun",
+      "runDir":         cfg.runDir,
+      "startedAt":      datetime.datetime.now().isoformat(timespec="seconds"),
+      "completedAt":    None,
+      "config":         asdict(cfg),
+      "cycles":         [],
+   }
+   writeJsonAtomic(masterFile(cfg), master)
 
    currentModel = cfg.initialModel
    for cycle in range(1, cfg.maxCycles + 1):
-      currentModel = runCycle(cfg, cycle, currentModel)
+      currentModel, cycleEntry = runCycle(cfg, cycle, currentModel)
+      master["cycles"].append(cycleEntry)
+      master["completedAt"] = datetime.datetime.now().isoformat(timespec="seconds")
+      writeJsonAtomic(masterFile(cfg), master)
 
    print(f"\n=== Training complete! Final model: {currentModel} ===")
-   print(f"Evaluation results in: {cfg.evalDir}/")
+   print(f"Run report: {masterFile(cfg)}")
 
 
 if __name__ == "__main__":

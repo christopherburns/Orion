@@ -15,6 +15,20 @@ enum MoveCategory: String, CaseIterable {
    case reserveCard = "Reserve Card"
    case discardGem = "Discard Gem"
 
+   /// camelCase identifier for structured output (the rawValue holds the display label).
+   var jsonKey: String {
+      switch self {
+      case .purchaseTier1:    return "purchaseTier1"
+      case .purchaseTier2:    return "purchaseTier2"
+      case .purchaseTier3:    return "purchaseTier3"
+      case .purchaseReserved: return "purchaseReserved"
+      case .takeThreeGems:    return "takeThreeGems"
+      case .takeTwoGems:      return "takeTwoGems"
+      case .reserveCard:      return "reserveCard"
+      case .discardGem:       return "discardGem"
+      }
+   }
+
    /// Categorize a move index into its type
    /// - Parameter moveIndex: Canonical move index (0-47)
    /// - Returns: The category this move belongs to
@@ -129,6 +143,23 @@ struct MoveStatistics {
       }
       print(String(repeating: "=", count: tableWidth))
    }
+
+   /// Build a serializable structured representation of the statistics.
+   func toReport () -> DataGenerator.MoveStatisticsReport {
+      let totalWinner = winnerMoves.values.reduce(0, +)
+      let totalLoser  = loserMoves.values.reduce(0, +)
+      let totalTied   = tiedMoves.values.reduce(0, +)
+      var byMoveType: [String: DataGenerator.MoveCountsReport] = [:]
+      for category in MoveCategory.allCases {
+         byMoveType[category.jsonKey] = DataGenerator.MoveCountsReport(
+            winner: winnerMoves[category]!,
+            loser:  loserMoves[category]!,
+            tied:   tiedMoves[category]!)
+      }
+      return DataGenerator.MoveStatisticsReport(
+         totals: DataGenerator.MoveCountsReport(winner: totalWinner, loser: totalLoser, tied: totalTied),
+         byMoveType: byMoveType)
+   }
 }
 
 /// State for one concurrent game lane during batched MCTS data generation.
@@ -166,6 +197,57 @@ public struct DataGenerator {
       opts.addOption("Data Generator", "b", "batch-size", "Number of games per batch / parallel lanes (default: 128)")
       opts.addOption("Data Generator", "", "mcts-debug", "Print MCTS search tree and π after every move (very verbose, for debugging)", requireArgument: false)
       opts.addOption("Data Generator", "", "serial", "Force single-threaded generation (default: concurrent)", requireArgument: false)
+      opts.addOption("Data Generator", "", "report-json", "Write a structured JSON report of inputs and results to this path")
+   }
+
+
+   // MARK: - Structured report
+
+   struct GenerateReport: Encodable {
+      let schemaVersion: Int
+      let command: String
+      let startedAt: String
+      let completedAt: String
+      let elapsedSeconds: Double
+      let parameters: Parameters
+      let results: Results
+
+      struct Parameters: Encodable {
+         let agent: String
+         let agentKind: String
+         let agentLabel: String
+         let gameCount: Int
+         let playerCount: Int
+         let temperature: Float
+         let maxTurns: Int
+         let seed: UInt64
+         let monteCarloSamples: Int
+         let cPuct: Float
+         let batchSize: Int
+         let output: String
+      }
+
+      struct Results: Encodable {
+         let successfulGames: Int
+         let timedOutGames: Int
+         let totalExamples: Int
+         let avgExamplesPerGame: Double
+         let outputFile: String
+         let outputBytesUncompressed: Int
+         let outputBytesCompressed: Int
+         let moveStatistics: MoveStatisticsReport
+      }
+   }
+
+   struct MoveCountsReport: Encodable {
+      let winner: Int
+      let loser: Int
+      let tied: Int
+   }
+
+   struct MoveStatisticsReport: Encodable {
+      let totals: MoveCountsReport
+      let byMoveType: [String: MoveCountsReport]
    }
 
 
@@ -316,6 +398,17 @@ public struct DataGenerator {
       return (completedGames, statistics)
    }
 
+   /// Statistics returned from a generation run, suitable for building a structured report.
+   public struct GenerateStats {
+      public let successfulGames: Int
+      public let timedOutGames: Int
+      public let totalExamples: Int
+      public let outputFile: String
+      public let outputBytesUncompressed: Int
+      public let outputBytesCompressed: Int
+      let moveStatistics: MoveStatistics
+   }
+
    /// Generate training data programmatically (without parsing command-line args)
    public static func generateTrainingData (
       gameCount: Int,
@@ -329,7 +422,7 @@ public struct DataGenerator {
       cPuct: Float = 1.5,
       mctsDebug: Bool = false,
       batchSize: Int = 128,
-      serial: Bool = false) throws {
+      serial: Bool = false) throws -> GenerateStats {
 
       precondition(monteCarloSamples >= 1, "monteCarloSamples must be at least 1")
 
@@ -420,7 +513,7 @@ public struct DataGenerator {
 
       // Save to compressed JSON
       print("Encoding to compressed JSON...")
-      try dataset.save(to: outputPath, compress: true)
+      let (uncompressedBytes, compressedBytes) = try dataset.save(to: outputPath, compress: true)
 
       print("\nTraining data generation complete!")
       print("  Successful games: \(successfulGames)/\(gameCount)")
@@ -432,6 +525,15 @@ public struct DataGenerator {
       print("\nComputing move statistics...")
       statistics.printSummary()
       print("\nDone!")
+
+      return GenerateStats(
+         successfulGames: successfulGames,
+         timedOutGames: gameCount - successfulGames,
+         totalExamples: totalExamples,
+         outputFile: outputPath + ".bin.lz4",
+         outputBytesUncompressed: uncompressedBytes,
+         outputBytesCompressed: compressedBytes,
+         moveStatistics: statistics)
    }
 
    public static func main () throws {
@@ -461,8 +563,10 @@ public struct DataGenerator {
       let mctsDebug = opts.wasProvided(option: "mcts-debug")
       let batchSize = opts.get(option: "batch-size", orElse: 128)
       let serial = opts.wasProvided(option: "serial")
+      let reportPath: String? = opts.get(option: "report-json")
 
-      try generateTrainingData(
+      let startDate = Date()
+      let stats = try generateTrainingData(
          gameCount: gameCount,
          playerCount: playerCount,
          agentSpec: agentSpec,
@@ -476,5 +580,39 @@ public struct DataGenerator {
          batchSize: batchSize,
          serial: serial
       )
+      let endDate = Date()
+
+      if let reportPath = reportPath {
+         let report = GenerateReport(
+            schemaVersion:  Report.SCHEMA_VERSION,
+            command:        "generate",
+            startedAt:      Report.timestamp(startDate),
+            completedAt:    Report.timestamp(endDate),
+            elapsedSeconds: endDate.timeIntervalSince(startDate),
+            parameters: GenerateReport.Parameters(
+               agent:             agentSpec,
+               agentKind:         Report.agentKind(spec: agentSpec),
+               agentLabel:        Report.agentLabel(spec: agentSpec),
+               gameCount:         gameCount,
+               playerCount:       playerCount,
+               temperature:       temperature,
+               maxTurns:          maxTurns,
+               seed:              baseSeed,
+               monteCarloSamples: monteCarloSamples,
+               cPuct:             cPuct,
+               batchSize:         batchSize,
+               output:            outputPath),
+            results: GenerateReport.Results(
+               successfulGames:        stats.successfulGames,
+               timedOutGames:          stats.timedOutGames,
+               totalExamples:          stats.totalExamples,
+               avgExamplesPerGame:     Double(stats.totalExamples) / Double(max(stats.successfulGames, 1)),
+               outputFile:             stats.outputFile,
+               outputBytesUncompressed: stats.outputBytesUncompressed,
+               outputBytesCompressed:   stats.outputBytesCompressed,
+               moveStatistics:         stats.moveStatistics.toReport()))
+         try Report.write(report, to: reportPath)
+         print("Report written to: \(reportPath)")
+      }
    }
 }

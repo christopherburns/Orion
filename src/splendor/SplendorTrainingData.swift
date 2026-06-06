@@ -159,7 +159,8 @@ public struct TrainingDataset: Codable {
    ///       [360 * Float32] state
    ///       [48 * Float32]  policy
    ///       [1 * Float32]   value
-   public func save (to path: String, compress: Bool = true) throws {
+   @discardableResult
+   public func save (to path: String, compress: Bool = true) throws -> (uncompressedBytes: Int, compressedBytes: Int) {
       let finalPath = path + ".bin.lz4"
       let url = URL(fileURLWithPath: finalPath)
       let dir = url.deletingLastPathComponent()
@@ -207,6 +208,7 @@ public struct TrainingDataset: Codable {
       let compressed = try compressData(buffer)
       try compressed.write(to: url)
       print("File written successfully to \(finalPath) (\(totalSize) bytes -> \(compressed.count) bytes).")
+      return (totalSize, compressed.count)
    }
 
    // MARK: - Load single file (format dispatch)
