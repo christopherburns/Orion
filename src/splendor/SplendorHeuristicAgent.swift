@@ -23,12 +23,24 @@ public class SplendorHeuristicAgent: AgentProtocol {
 
    private func heuristicPolicy (splendorGame: Splendor.Game, currentPlayerIndex: Int) -> [Float] {
       let moveCount = splendorGame.canonicalMoveCount
-      let policyLogits = (0..<moveCount).map { _ in
-         let randomUInt = prng.next()
-         return Float(randomUInt) / Float(UInt64.max)
+      var logits = [Float](repeating: 0.0, count: moveCount)
+      for i in 0..<moveCount {
+         let noise = Float(prng.next()) / Float(UInt64.max) * 0.3
+         // Move-type prior bias. Purchases drive scoring; gem-taking is preparation;
+         // reserves are situational; discards are forced (illegal unless >10 gems).
+         let bias: Float
+         switch i {
+         case 0..<12:  bias = 2.0   // purchase visible card
+         case 12..<15: bias = 2.0   // purchase reserved card
+         case 15..<25: bias = 1.0   // take three gems
+         case 25..<30: bias = 0.5   // take two gems
+         case 30..<42: bias = 0.3   // reserve card
+         case 42..<48: bias = 0.0   // discard gem
+         default:      bias = 0.0
+         }
+         logits[i] = bias + noise
       }
-
-      return policyLogits
+      return logits
    }
 
    private func heuristicValue (splendorGame: Splendor.Game, currentPlayerIndex: Int) -> Float {
