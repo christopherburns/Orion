@@ -243,6 +243,12 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> tuple[str, dict]:
    if evalRandomReport is None:
       sys.exit(1)
 
+   print("Evaluating model vs heuristic...")
+   evalHeuristicReport = evaluatePlay(cfg, [f"{currentModel}/", "heuristic"],
+                                      reportFile(cfg, cycle, "eval_vs_heuristic"))
+   if evalHeuristicReport is None:
+      sys.exit(1)
+
    print(f"Evaluating model vs {prevModel}...")
    evalPrevReport = evaluatePlay(cfg, [f"{currentModel}/", f"{prevModel}/"],
                                  reportFile(cfg, cycle, "eval_vs_prev"))
@@ -270,6 +276,7 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> tuple[str, dict]:
       "generate":          generateReport,
       "train":             trainReport,
       "evalVsRandom":      evalRandomReport,
+      "evalVsHeuristic":   evalHeuristicReport,
       "evalVsPrev":        evalPrevReport,
    }
 
@@ -279,7 +286,8 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> tuple[str, dict]:
 
 def runFirstCycleFromData (cfg: Config, dataPath: str) -> tuple[str, dict]:
    """Cycle 1 when starting from a data file: skip generation, train from scratch
-   on the supplied data, evaluate against random only (no champion to compare to)."""
+   on the supplied data, evaluate against random and heuristic (no champion to
+   compare to yet)."""
    cycle = 1
    lr = cycleLearningRate(cfg, cycle)
    print(f"\n=== Cycle {cycle} (training on supplied data, LR: {lr:.6f}) ===")
@@ -298,6 +306,12 @@ def runFirstCycleFromData (cfg: Config, dataPath: str) -> tuple[str, dict]:
    if evalRandomReport is None:
       sys.exit(1)
 
+   print("Evaluating model vs heuristic...")
+   evalHeuristicReport = evaluatePlay(cfg, [f"{currentModel}/", "heuristic"],
+                                      reportFile(cfg, cycle, "eval_vs_heuristic"))
+   if evalHeuristicReport is None:
+      sys.exit(1)
+
    cycleEntry = {
       "cycleIndex":        cycle,
       "previousModel":     None,
@@ -309,6 +323,7 @@ def runFirstCycleFromData (cfg: Config, dataPath: str) -> tuple[str, dict]:
       "generate":          None,
       "train":             trainReport,
       "evalVsRandom":      evalRandomReport,
+      "evalVsHeuristic":   evalHeuristicReport,
       "evalVsPrev":        None,
    }
    return currentModel, cycleEntry
