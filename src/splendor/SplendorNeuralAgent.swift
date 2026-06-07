@@ -38,6 +38,16 @@ public class PolicyValueNetwork: Module {
    public static let HIDDEN_DIMENSIONS = 512
    public static let DEFAULT_DROPOUT: Float = 0.1
 
+   /// Default precision for parameters and forward pass when no override is given.
+   /// bfloat16 unlocks the M-series matrix-multiply hardware for large GEMMs
+   /// (~1.6× wall-clock for training) while keeping fp32's exponent range. Inference
+   /// paths with small per-call batches currently run faster in fp32 — the
+   /// `--precision` CLI flag on each command picks per-workload.
+   public static let DEFAULT_PRECISION: DType = .bfloat16
+
+   /// Per-instance precision used for weights and forward-pass casts.
+   public let precision: DType
+
    // Current architecture version - increment when architecture changes
    public static let ARCHITECTURE_VERSION = 4
 
@@ -62,10 +72,13 @@ public class PolicyValueNetwork: Module {
    let valueOutput: Linear
 
    /// Initialize network with optional seed for deterministic weight initialization
-   /// - Parameter seed: If provided, weights will be initialized deterministically
-   /// - Parameter dropoutRate: Dropout probability for trunk layers (default: 0.1)
-   public init (seed: UInt64? = nil, dropoutRate: Float = DEFAULT_DROPOUT) {
+   /// - Parameters:
+   ///   - seed: If provided, weights will be initialized deterministically
+   ///   - dropoutRate: Dropout probability for trunk layers (default: 0.1)
+   ///   - precision: dtype for weights, biases, and forward-pass casts
+   public init (seed: UInt64? = nil, dropoutRate: Float = DEFAULT_DROPOUT, precision: DType = DEFAULT_PRECISION) {
       self.dropoutRate = dropoutRate
+      self.precision = precision
 
       // Create deterministic key if seed provided
       let keys: [MLXArray]
@@ -79,14 +92,14 @@ public class PolicyValueNetwork: Module {
 
       // Shared trunk: 361 -> 512 -> 512 -> 512
       self.dense1 = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.INPUT_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[0]),
-         bias: MLXArray.zeros([PolicyValueNetwork.HIDDEN_DIMENSIONS]))
+         inputDimensions: PolicyValueNetwork.INPUT_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[0], precision: precision),
+         bias: MLXArray.zeros([PolicyValueNetwork.HIDDEN_DIMENSIONS]).asType(precision))
       self.dense2 = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[1]),
-         bias: MLXArray.zeros([PolicyValueNetwork.HIDDEN_DIMENSIONS]))
+         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[1], precision: precision),
+         bias: MLXArray.zeros([PolicyValueNetwork.HIDDEN_DIMENSIONS]).asType(precision))
       self.dense3 = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[2]),
-         bias: MLXArray.zeros([PolicyValueNetwork.HIDDEN_DIMENSIONS]))
+         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[2], precision: precision),
+         bias: MLXArray.zeros([PolicyValueNetwork.HIDDEN_DIMENSIONS]).asType(precision))
 
       // Dropout layers
       self.dropout1 = Dropout(p: dropoutRate)
@@ -95,14 +108,16 @@ public class PolicyValueNetwork: Module {
 
       // Policy head: 512 -> 48 logits
       self.policyHead = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.POLICY_DIMENSIONS, key: seed == nil ? nil : keys[3]),
-         bias: MLXArray.zeros([PolicyValueNetwork.POLICY_DIMENSIONS]))
+         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.POLICY_DIMENSIONS, key: seed == nil ? nil : keys[3], precision: precision),
+         bias: MLXArray.zeros([PolicyValueNetwork.POLICY_DIMENSIONS]).asType(precision))
 
       // Value head: 256 -> 128 -> 1
       self.valueHidden = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: 128, key: seed == nil ? nil : keys[4]), bias: MLXArray.zeros([128]))
+         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: 128, key: seed == nil ? nil : keys[4], precision: precision),
+         bias: MLXArray.zeros([128]).asType(precision))
       self.valueOutput = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: 128, outputDimensions: 1, key: seed == nil ? nil : keys[5]), bias: MLXArray.zeros([1]))
+         inputDimensions: 128, outputDimensions: 1, key: seed == nil ? nil : keys[5], precision: precision),
+         bias: MLXArray.zeros([1]).asType(precision))
 
       super.init()
    }
@@ -115,8 +130,10 @@ public class PolicyValueNetwork: Module {
       policyHeadWeight: MLXArray, policyHeadBias: MLXArray,
       valueHiddenWeight: MLXArray, valueHiddenBias: MLXArray,
       valueOutputWeight: MLXArray, valueOutputBias: MLXArray,
-      dropoutRate: Float = DEFAULT_DROPOUT) {
+      dropoutRate: Float = DEFAULT_DROPOUT,
+      precision: DType = DEFAULT_PRECISION) {
       self.dropoutRate = dropoutRate
+      self.precision = precision
       self.dense1 = Linear(weight: dense1Weight, bias: dense1Bias)
       self.dense2 = Linear(weight: dense2Weight, bias: dense2Bias)
       self.dense3 = Linear(weight: dense3Weight, bias: dense3Bias)
@@ -169,7 +186,7 @@ public class PolicyValueNetwork: Module {
          policyHeadWeight: policyHeadWeight, policyHeadBias: policyHeadBias,
          valueHiddenWeight: valueHiddenWeight, valueHiddenBias: valueHiddenBias,
          valueOutputWeight: valueOutputWeight, valueOutputBias: valueOutputBias,
-         dropoutRate: self.dropoutRate)
+         dropoutRate: self.dropoutRate, precision: self.precision)
    }
 
    /// Initialize a linear layer with He initialization
@@ -178,20 +195,23 @@ public class PolicyValueNetwork: Module {
    ///   - outputDimensions: Number of output features
    ///   - key: Optional PRNG key for deterministic initialization
    /// - Returns: Weight matrix initialized with He normal distribution
-   private static func heInitialization (inputDimensions: Int, outputDimensions: Int, key: MLXArray? = nil) -> MLXArray {
+   private static func heInitialization (inputDimensions: Int, outputDimensions: Int, key: MLXArray? = nil, precision: DType = DEFAULT_PRECISION) -> MLXArray {
       let stddev = sqrt(2.0 / Float(inputDimensions))
-      return MLXRandom.normal([outputDimensions, inputDimensions], key: key) * stddev
+      let arr = MLXRandom.normal([outputDimensions, inputDimensions], key: key) * stddev
+      return arr.asType(precision)
    }
 
    /// Forward pass through the network
-   /// - Parameter x: Input tensor of shape [batchSize, 361]
-   /// - Returns: Tuple of (policy_logits, value) where policy_logits is [batchSize, 48] and value is [batchSize, 1]
+   /// - Parameter x: Input tensor of shape [batchSize, 357] in any float dtype; cast to `self.precision` on entry.
+   /// - Returns: Tuple of (policy_logits, value) where policy_logits is [batchSize, 48] and value is [batchSize, 1]. Both are in the network's precision; callers cast as needed.
    public func execute (_ x: MLXArray) -> (policyLogits: MLXArray, value: MLXArray) {
       precondition(x.shape.count == 2, "Input must have shape [batchSize, 361]")
       precondition(x.shape[1] == PolicyValueNetwork.INPUT_DIMENSIONS, "Input must have \(PolicyValueNetwork.INPUT_DIMENSIONS) features")
 
+      let xCast = x.dtype == self.precision ? x : x.asType(self.precision)
+
       // Shared trunk with ReLU activations and dropout
-      var h = dropout1(relu(dense1(x)))
+      var h = dropout1(relu(dense1(xCast)))
       h = dropout2(relu(dense2(h)))
       h = dropout3(relu(dense3(h)))
 
@@ -267,10 +287,12 @@ public class PolicyValueNetwork: Module {
    }
 
    /// Factory method to create a network with weights loaded from disk
-   /// - Parameter url: Directory URL where the model is stored
+   /// - Parameters:
+   ///   - url: Directory URL where the model is stored
+   ///   - precision: dtype to materialize the loaded weights at
    /// - Returns: Tuple of (loaded network, metadata)
    /// - Throws: Errors from file operations or deserialization
-   public static func load (from url: URL) throws -> (network: PolicyValueNetwork, metadata: ModelMetadata) {
+   public static func load (from url: URL, precision: DType = DEFAULT_PRECISION) throws -> (network: PolicyValueNetwork, metadata: ModelMetadata) {
       // Load metadata
       let metadataURL = url.appendingPathComponent("metadata.json")
       let metadataData = try Data(contentsOf: metadataURL)
@@ -320,7 +342,7 @@ public class PolicyValueNetwork: Module {
                                              count: count))
          }
 
-         return MLXArray(floatArray).reshaped(shape)
+         return MLXArray(floatArray).reshaped(shape).asType(precision)
       }
 
       // Load all weights and biases from the dictionary
@@ -345,7 +367,7 @@ public class PolicyValueNetwork: Module {
          policyHeadWeight: policyHeadWeight, policyHeadBias: policyHeadBias,
          valueHiddenWeight: valueHiddenWeight, valueHiddenBias: valueHiddenBias,
          valueOutputWeight: valueOutputWeight, valueOutputBias: valueOutputBias,
-         dropoutRate: savedDropoutRate)
+         dropoutRate: savedDropoutRate, precision: precision)
 
       return (network, metadata)
    }
@@ -359,16 +381,20 @@ public class SplendorNeuralAgent: AgentProtocol {
    private let metadata: ModelMetadata
 
    /// Initialize with untrained network
-   /// - Parameter seed: Optional seed for deterministic weight initialization
-   public init (seed: UInt64? = nil) {
-      self.network = PolicyValueNetwork(seed: seed)
+   /// - Parameters:
+   ///   - seed: Optional seed for deterministic weight initialization
+   ///   - precision: dtype for parameters and forward pass
+   public init (seed: UInt64? = nil, precision: DType = PolicyValueNetwork.DEFAULT_PRECISION) {
+      self.network = PolicyValueNetwork(seed: seed, precision: precision)
       self.metadata = ModelMetadata(version: "0.1.0", architectureVersion: PolicyValueNetwork.ARCHITECTURE_VERSION)
    }
 
    /// Initialize by loading a trained model from disk
-   /// - Parameter url: Directory URL where the model is stored
-   public init (url: URL) throws {
-      let (network, metadata) = try PolicyValueNetwork.load(from: url)
+   /// - Parameters:
+   ///   - url: Directory URL where the model is stored
+   ///   - precision: dtype to materialize the loaded weights at
+   public init (url: URL, precision: DType = PolicyValueNetwork.DEFAULT_PRECISION) throws {
+      let (network, metadata) = try PolicyValueNetwork.load(from: url, precision: precision)
       self.network = network
       self.metadata = metadata
    }

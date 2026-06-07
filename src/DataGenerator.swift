@@ -1,6 +1,7 @@
 import Swift
 import Foundation
 import Core
+import MLX
 import Splendor
 import Utility
 
@@ -197,6 +198,7 @@ public struct DataGenerator {
       opts.addOption("Data Generator", "b", "batch-size", "Number of games per batch / parallel lanes (default: 128)")
       opts.addOption("Data Generator", "", "mcts-debug", "Print MCTS search tree and π after every move (very verbose, for debugging)", requireArgument: false)
       opts.addOption("Data Generator", "", "serial", "Force single-threaded generation (default: concurrent)", requireArgument: false)
+      opts.addOption("Data Generator", "", "precision", "Numeric precision for the neural agent: fp32, bf16, fp16 (default: fp32)")
       opts.addOption("Data Generator", "", "report-json", "Write a structured JSON report of inputs and results to this path")
    }
 
@@ -422,7 +424,8 @@ public struct DataGenerator {
       cPuct: Float = 1.5,
       mctsDebug: Bool = false,
       batchSize: Int = 128,
-      serial: Bool = false) throws -> GenerateStats {
+      serial: Bool = false,
+      precision: DType = PolicyValueNetwork.DEFAULT_PRECISION) throws -> GenerateStats {
 
       precondition(monteCarloSamples >= 1, "monteCarloSamples must be at least 1")
 
@@ -461,7 +464,7 @@ public struct DataGenerator {
 
          group.enter()
          workQueue.async {
-            let agent = initializeAgents(playerCount: 1, agentSpecs: [agentSpec], seed: taskBaseSeed)[0]
+            let agent = initializeAgents(playerCount: 1, agentSpecs: [agentSpec], seed: taskBaseSeed, precision: precision)[0]
             let mctsSearch = MCTSSearch(agent: agent, monteCarloSamples: monteCarloSamples, cPuct: cPuct, debug: mctsDebug)
 
             let result = batchedGenerateGames(
@@ -563,6 +566,8 @@ public struct DataGenerator {
       let mctsDebug = opts.wasProvided(option: "mcts-debug")
       let batchSize = opts.get(option: "batch-size", orElse: 128)
       let serial = opts.wasProvided(option: "serial")
+      let precisionStr = opts.get(option: "precision", orElse: "fp32")
+      let precision = parsePrecision(precisionStr)
       let reportPath: String? = opts.get(option: "report-json")
 
       let startDate = Date()
@@ -578,7 +583,8 @@ public struct DataGenerator {
          cPuct: cPuct,
          mctsDebug: mctsDebug,
          batchSize: batchSize,
-         serial: serial
+         serial: serial,
+         precision: precision
       )
       let endDate = Date()
 

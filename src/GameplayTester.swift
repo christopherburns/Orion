@@ -1,6 +1,7 @@
 import Swift
 import Foundation
 import Core
+import MLX
 import Splendor
 import Utility
 
@@ -29,6 +30,7 @@ public struct GameplayTester {
       opts.addOption("Gameplay Tester", "", "max-turns", "Maximum turns per game before timeout (default: 1000)")
       opts.addOption("Gameplay Tester", "b", "batch-size", "Number of games to run in parallel (default: 64)")
       opts.addOption("Gameplay Tester", "", "serial", "Force single-threaded evaluation (default: concurrent)", requireArgument: false)
+      opts.addOption("Gameplay Tester", "", "precision", "Numeric precision for the neural agent: fp32, bf16, fp16 (default: fp32)")
       opts.addOption("Gameplay Tester", "", "report-json", "Write a structured JSON report of inputs and results to this path")
    }
 
@@ -434,6 +436,8 @@ public struct GameplayTester {
       let maxTurns = opts.get(option: "max-turns", orElse: 1000)
       let batchSize = opts.get(option: "batch-size", orElse: 64)
       let serial = opts.wasProvided(option: "serial")
+      let precisionStr = opts.get(option: "precision", orElse: "fp32")
+      let precision = parsePrecision(precisionStr)
       let reportPath: String? = opts.get(option: "report-json")
       let startDate = Date()
 
@@ -448,7 +452,7 @@ public struct GameplayTester {
       print("  Seed:             \(seed)")
 
       // Initialize agents based on command-line specifications
-      let agents = initializeAgents(playerCount: playerCount, agentSpecs: agentSpecs, seed: seed)
+      let agents = initializeAgents(playerCount: playerCount, agentSpecs: agentSpecs, seed: seed, precision: precision)
 
       // Interactive mode: any human player triggers a single interactive game
       if agents.contains(where: { $0.isHuman }) {
@@ -484,7 +488,7 @@ public struct GameplayTester {
 
          group.enter()
          workQueue.async {
-            let taskAgents = initializeAgents(playerCount: playerCount, agentSpecs: agentSpecs, seed: taskBaseSeed)
+            let taskAgents = initializeAgents(playerCount: playerCount, agentSpecs: agentSpecs, seed: taskBaseSeed, precision: precision)
 
             let results = batchedPlayGames(
                gameCount: taskGameCount,

@@ -1,15 +1,30 @@
 import Foundation
 import Core
+import MLX
 import Splendor
 import Utility
+
+/// Parse a precision string ("fp32"/"float32"/"bf16"/"bfloat16"/"fp16"/"float16") into a DType.
+/// Falls back to .float32 for unrecognized inputs after a warning.
+func parsePrecision (_ s: String) -> DType {
+   switch s.lowercased() {
+   case "fp32", "float32":   return .float32
+   case "bf16", "bfloat16":  return .bfloat16
+   case "fp16", "float16":   return .float16
+   default:
+      print("Warning: unknown precision '\(s)' — defaulting to float32")
+      return .float32
+   }
+}
 
 /// Initialize agents based on command-line specifications
 /// - Parameters:
 ///   - playerCount: Number of players in the game
 ///   - agentSpecs: Array of agent specifications (model paths or "random")
 ///   - seed: Random seed for DumbAgents
+///   - precision: dtype for any neural networks loaded as part of this agent set
 /// - Returns: Array of agents, one per player
-func initializeAgents (playerCount: Int, agentSpecs: [String], seed: UInt64) -> [any AgentProtocol] {
+func initializeAgents (playerCount: Int, agentSpecs: [String], seed: UInt64, precision: DType = PolicyValueNetwork.DEFAULT_PRECISION) -> [any AgentProtocol] {
    var specs: [String] = []
 
    if agentSpecs.isEmpty {
@@ -47,14 +62,14 @@ func initializeAgents (playerCount: Int, agentSpecs: [String], seed: UInt64) -> 
       }
       else if spec.lowercased() == "uninitialized" {
          // Use uninitialized neural agent with deterministic seed
-         agent = SplendorNeuralAgent(seed: seed + UInt64(index))
+         agent = SplendorNeuralAgent(seed: seed + UInt64(index), precision: precision)
          print("Using uninitialized neural agent for player \(index) (seed: \(seed + UInt64(index)))")
       }
       else {
          // Treat as model path
          let modelURL = URL(fileURLWithPath: spec)
          do {
-            agent = try SplendorNeuralAgent(url: modelURL)
+            agent = try SplendorNeuralAgent(url: modelURL, precision: precision)
             print("Loaded neural agent from \(spec) for player \(index)")
          } catch {
             print("Error: Failed to load model from \(spec) for player \(index): \(error)")

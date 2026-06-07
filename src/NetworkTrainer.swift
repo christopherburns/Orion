@@ -27,6 +27,7 @@ public struct NetworkTrainer {
       opts.addOption("Network Trainer", "E", "early-stopping", "Stop training if validation loss doesn't improve for N epochs (default: 0 = disabled)")
       opts.addOption("Network Trainer", "w", "weight-decay", "Weight decay (L2 regularization) strength (default: 0.0)")
       opts.addOption("Network Trainer", "d", "dropout", "Dropout rate for trunk layers (default: 0.1, 0=disabled)")
+      opts.addOption("Network Trainer", "", "precision", "Numeric precision for parameters and forward pass: fp32, bf16, fp16 (default: bf16)")
       opts.addOption("Network Trainer", "", "report-json", "Write a structured JSON report of inputs and results to this path")
    }
 
@@ -100,13 +101,15 @@ public struct NetworkTrainer {
    /// - Parameters:
    ///   - modelPath: Optional path to model file. If nil, creates new untrained model
    ///   - seed: Random seed for new model initialization (ignored if loading)
+   ///   - dropoutRate: dropout for new networks (ignored when loading)
+   ///   - precision: dtype for parameters and forward-pass casts
    /// - Returns: Tuple of (network, metadata)
    /// - Throws: Errors from file operations or model loading
-   static func loadOrCreateNetwork (modelPath: String?, seed: UInt64, dropoutRate: Float = PolicyValueNetwork.DEFAULT_DROPOUT) throws -> (network: PolicyValueNetwork, metadata: ModelMetadata) {
+   static func loadOrCreateNetwork (modelPath: String?, seed: UInt64, dropoutRate: Float = PolicyValueNetwork.DEFAULT_DROPOUT, precision: DType = PolicyValueNetwork.DEFAULT_PRECISION) throws -> (network: PolicyValueNetwork, metadata: ModelMetadata) {
       if let modelPath = modelPath {
-         return try PolicyValueNetwork.load(from: URL(fileURLWithPath: modelPath))
+         return try PolicyValueNetwork.load(from: URL(fileURLWithPath: modelPath), precision: precision)
       } else {
-         let network = PolicyValueNetwork(seed: seed, dropoutRate: dropoutRate)
+         let network = PolicyValueNetwork(seed: seed, dropoutRate: dropoutRate, precision: precision)
          let metadata = ModelMetadata(
             version: "0.1.0",
             architectureVersion: PolicyValueNetwork.ARCHITECTURE_VERSION,
@@ -122,16 +125,18 @@ public struct NetworkTrainer {
    ///   - predicted: [batchSize, 48] logits
    ///   - target: [batchSize, 48] probabilities
    static func policyLoss (predicted: MLXArray, target: MLXArray) -> Float {
-      let logProbs = logSoftmax(predicted, axis: -1)
+      // Upcast logits to fp32 so logSoftmax stays numerically safe even when the
+      // forward pass ran in bf16. Targets are already fp32.
+      let logProbs = logSoftmax(predicted.asType(.float32), axis: -1)
       let perExampleLoss = -sum(target * logProbs, axis: -1)
       return Float(mean(perExampleLoss).item(Float.self))
    }
 
    /// Compute value loss (MSE between predicted and target values)
    static func valueLoss (predicted: MLXArray, target: MLXArray) -> Float {
-      // predicted: [batchSize, 1] values
-      // target: [batchSize, 1] values
-      let diff = predicted - target
+      // predicted: [batchSize, 1] values (may be bf16 from the network)
+      // target: [batchSize, 1] values (fp32)
+      let diff = predicted.asType(.float32) - target
       return Float(mean(diff * diff).item(Float.self))
    }
 
@@ -154,7 +159,7 @@ public struct NetworkTrainer {
          let valBatch = Array(validationExamples[valBatchStart..<valBatchEnd])
 
          let valStatesFlat = valBatch.flatMap { $0.state }
-         let valStates = MLXArray(valStatesFlat).reshaped([valBatch.count, PolicyValueNetwork.INPUT_DIMENSIONS])
+         let valStates = MLXArray(valStatesFlat).reshaped([valBatch.count, PolicyValueNetwork.INPUT_DIMENSIONS]).asType(network.precision)
          let valPolicyFlat = valBatch.flatMap { $0.policy }
          let valPolicyTargets = MLXArray(valPolicyFlat).reshaped([valBatch.count, PolicyValueNetwork.POLICY_DIMENSIONS])
          let valValueTargets = MLXArray(valBatch.map { $0.value }).reshaped([valBatch.count, 1])
@@ -188,11 +193,13 @@ public struct NetworkTrainer {
          // Forward pass with current model state
          let (p, v) = model.execute(states)
 
-         // Compute losses as MLXArrays (needed for gradient computation)
-         let logProbs = logSoftmax(p, axis: -1)
+         // Compute losses as MLXArrays (needed for gradient computation).
+         // Upcast to fp32 inside loss math: bf16 forward + fp32 loss is the
+         // standard mixed-precision pattern and keeps softmax/MSE stable.
+         let logProbs = logSoftmax(p.asType(.float32), axis: -1)
          let pl = mean(-sum(policyTargets * logProbs, axis: -1))
 
-         let diff = v - valueTargets
+         let diff = v.asType(.float32) - valueTargets
          let vl = mean(diff * diff)
 
          return [policyWeight * pl + valueWeight * vl]
@@ -245,7 +252,8 @@ public struct NetworkTrainer {
       valueWeight: Float = 1.0,
       weightDecay: Float = 0.0,
       earlyStoppingPatience: Int = 0,
-      dropoutRate: Float = PolicyValueNetwork.DEFAULT_DROPOUT) throws -> TrainStats {
+      dropoutRate: Float = PolicyValueNetwork.DEFAULT_DROPOUT,
+      precision: DType = PolicyValueNetwork.DEFAULT_PRECISION) throws -> TrainStats {
 
       print("Loading training data from: \(inputPath)")
       let dataset = try TrainingDataset.load(from: inputPath)
@@ -268,7 +276,7 @@ public struct NetworkTrainer {
       print("Training set: \(trainingExamples.count) examples")
       print("Validation set: \(validationExamples.count) examples")
 
-      let (network, metadata) = try loadOrCreateNetwork(modelPath: modelPath, seed: seed, dropoutRate: dropoutRate)
+      let (network, metadata) = try loadOrCreateNetwork(modelPath: modelPath, seed: seed, dropoutRate: dropoutRate, precision: precision)
 
       // Training loop
       print("\nStarting training...")
@@ -303,9 +311,11 @@ public struct NetworkTrainer {
             let batchEnd = min(batchStart + batchSize, shuffledTraining.count)
             let batch = Array(shuffledTraining[batchStart..<batchEnd])
 
-            // Prepare batch data - flatten arrays and reshape
+            // Prepare batch data - flatten arrays and reshape. States get cast
+            // to the network's precision (bf16) so per-batch matmuls run on the
+            // M-series MXU; targets stay fp32 to feed the fp32 loss computation.
             let statesFlat = batch.flatMap { $0.state }
-            let states = MLXArray(statesFlat).reshaped([batch.count, PolicyValueNetwork.INPUT_DIMENSIONS])
+            let states = MLXArray(statesFlat).reshaped([batch.count, PolicyValueNetwork.INPUT_DIMENSIONS]).asType(network.precision)
             let policyFlat = batch.flatMap { $0.policy }
             let policyTargets = MLXArray(policyFlat).reshaped([batch.count, PolicyValueNetwork.POLICY_DIMENSIONS])
             let valueTargets = MLXArray(batch.map { $0.value }).reshaped([batch.count, 1])
@@ -455,6 +465,8 @@ public struct NetworkTrainer {
       let earlyStoppingPatience = opts.get(option: "early-stopping", orElse: 0)
       let weightDecay = opts.get(option: "weight-decay", orElse: Float(0.0))
       let dropoutRate = opts.get(option: "dropout", orElse: Float(PolicyValueNetwork.DEFAULT_DROPOUT))
+      let precisionStr = opts.get(option: "precision", orElse: "bf16")
+      let precision = parsePrecision(precisionStr)
       let reportPath: String? = opts.get(option: "report-json")
 
       // Print configuration
@@ -472,6 +484,7 @@ public struct NetworkTrainer {
       print("  Value weight:         \(valueWeight)")
       print("  Early stopping:       \(earlyStoppingPatience == 0 ? "disabled" : "\(earlyStoppingPatience) epochs")")
       print("  Dropout:              \(dropoutRate)")
+      print("  Precision:            \(precisionStr)")
       print("  Seed:                 \(seed)")
 
       let startDate = Date()
@@ -490,7 +503,8 @@ public struct NetworkTrainer {
          valueWeight: valueWeight,
          weightDecay: weightDecay,
          earlyStoppingPatience: earlyStoppingPatience,
-         dropoutRate: dropoutRate
+         dropoutRate: dropoutRate,
+         precision: precision
       )
       let endDate = Date()
 
