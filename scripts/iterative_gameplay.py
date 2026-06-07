@@ -21,7 +21,7 @@ Options:
    --initial-data PATH     Initial training data to start from (cycle 1 begins with train; skip generate)
    --games-per-cycle N     Games to generate per cycle                           [default: 5000]
    --epochs N              Training epochs per cycle                             [default: 100]
-   --training-batch-size N Training batch size                                   [default: 128]
+   --training-batch-size N Training batch size                                   [default: 256]
    --generate-batch-size N Games to run in parallel during MCTS generation       [default: 128]
    --cycles N              Total number of cycles to run                         [default: 15]
    --eval-games N          Games to play when evaluating                         [default: 500]
@@ -151,13 +151,16 @@ def generateData (cfg: Config, outputPath: str, agent: str, temperature: float, 
 
 def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: float,
                 prevModelPath: Optional[str], reportPath: str) -> Optional[dict]:
+   # Precision pinned to fp32: bf16 + small-batch + low-lr was empirically
+   # catastrophic (won 6.4% vs random in a controlled experiment), while
+   # fp32 / b=256 / lr=0.0003 (this script's defaults) won 83%.
    args = [
       cfg.binary, "train",
       "-i", inputPath,
       "-e", str(cfg.epochs),
       "-b", str(cfg.trainingBatchSize),
       "-o", outputPath,
-      "--precision", "bf16",
+      "--precision", "fp32",
       "--learning-rate", str(learningRate),
       "--weight-decay", str(cfg.weightDecay),
       "--early-stopping", str(cfg.earlyStopping),
