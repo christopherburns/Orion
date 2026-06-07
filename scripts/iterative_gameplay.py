@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """Iterative self-play training loop for Orion.
 
-Starts from an existing bootstrap model and runs N self-play cycles. Each cycle
-generates fresh data using the current champion, trains a new model from the
-prior cycle's weights, and gates acceptance on a win-rate threshold vs. the
-champion. Run scripts/bootstrap.sh first to produce an initial model.
+Starts from EITHER an existing model (cycle 1 generates fresh data from it) OR
+an existing training dataset (cycle 1 skips generation and trains directly on
+the supplied data). All subsequent cycles are full generate → train → evaluate
+loops gated by a win-rate threshold vs. the current champion.
 
 All outputs for this run land under RUN_DIR (created if missing): generated
 training data under RUN_DIR/trainingdata/, saved models under RUN_DIR/models/,
 per-call reports as RUN_DIR/cycle_NN_*.json, and the master aggregate as
 RUN_DIR/run.json. The master file is rewritten atomically after every cycle.
 
+Exactly one of --initial-model or --initial-data must be supplied.
+
 Usage:
-   iterative_gameplay.py RUN_DIR [options]
+   iterative_gameplay.py RUN_DIR (--initial-model PATH | --initial-data PATH) [options]
 
 Options:
-   --initial-model PATH    Initial model to start self-play from                 [default: none]
+   --initial-model PATH    Initial model to start self-play from (cycle 1 begins with generate)
+   --initial-data PATH     Initial training data to start from (cycle 1 begins with train; skip generate)
    --games-per-cycle N     Games to generate per cycle                           [default: 5000]
    --epochs N              Training epochs per cycle                             [default: 100]
    --training-batch-size N Training batch size                                   [default: 128]
@@ -62,7 +65,8 @@ from docopt import docopt
 @dataclass
 class Config:
    runDir:            str
-   initialModel:      str
+   initialModel:      Optional[str]
+   initialData:       Optional[str]
    gamesPerCycle:     int
    epochs:            int
    trainingBatchSize: int
@@ -153,6 +157,7 @@ def trainModel (cfg: Config, inputPath: str, outputPath: str, learningRate: floa
       "-e", str(cfg.epochs),
       "-b", str(cfg.trainingBatchSize),
       "-o", outputPath,
+      "--precision", "bf16",
       "--learning-rate", str(learningRate),
       "--weight-decay", str(cfg.weightDecay),
       "--early-stopping", str(cfg.earlyStopping),
@@ -269,10 +274,48 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> tuple[str, dict]:
    return nextChampion, cycleEntry
 
 
+def runFirstCycleFromData (cfg: Config, dataPath: str) -> tuple[str, dict]:
+   """Cycle 1 when starting from a data file: skip generation, train from scratch
+   on the supplied data, evaluate against random only (no champion to compare to)."""
+   cycle = 1
+   lr = cycleLearningRate(cfg, cycle)
+   print(f"\n=== Cycle {cycle} (training on supplied data, LR: {lr:.6f}) ===")
+
+   currentModel = modelPath(cfg, cycle)
+   print(f"Training model from scratch on {dataPath}...")
+   trainReport = trainModel(cfg, dataPath, currentModel, lr,
+                            prevModelPath=None,
+                            reportPath=reportFile(cfg, cycle, "train"))
+   if trainReport is None:
+      sys.exit(1)
+
+   print("Evaluating model vs random...")
+   evalRandomReport = evaluatePlay(cfg, [f"{currentModel}/", "random"],
+                                   reportFile(cfg, cycle, "eval_vs_random"))
+   if evalRandomReport is None:
+      sys.exit(1)
+
+   cycleEntry = {
+      "cycleIndex":        cycle,
+      "previousModel":     None,
+      "trainedModel":      currentModel,
+      "temperature":       None,        # no generate this cycle
+      "learningRate":      lr,
+      "winRateVsPrev":     None,        # no champion to compare against
+      "championAccepted":  True,        # always accepted; it's the first
+      "generate":          None,
+      "train":             trainReport,
+      "evalVsRandom":      evalRandomReport,
+      "evalVsPrev":        None,
+   }
+   return currentModel, cycleEntry
+
+
 def configFromArgs (args: dict) -> Config:
    return Config(
       runDir             = args["RUN_DIR"],
       initialModel       = args["--initial-model"],
+      initialData        = args["--initial-data"],
       gamesPerCycle      = int(args["--games-per-cycle"]),
       epochs             = int(args["--epochs"]),
       trainingBatchSize  = int(args["--training-batch-size"]),
@@ -299,12 +342,19 @@ def main ():
    global _command_log
    cfg = configFromArgs(docopt(__doc__))
 
-   if not os.path.isdir(cfg.initialModel):
-      print(f"Error: initial model not found at {cfg.initialModel}", file=sys.stderr)
-      print(f"Run scripts/bootstrap.sh first, or pass --initial-model PATH.", file=sys.stderr)
-      sys.exit(1)
+   # Exactly one of --initial-model / --initial-data must be supplied.
+   # docopt enforces this via the (... | ...) grouping in the usage line, but
+   # validate the file/directory existence too.
+   if cfg.initialModel is not None:
+      if not os.path.isdir(cfg.initialModel):
+         print(f"Error: --initial-model directory not found: {cfg.initialModel}", file=sys.stderr)
+         sys.exit(1)
+   elif cfg.initialData is not None:
+      if not os.path.exists(cfg.initialData):
+         print(f"Error: --initial-data path not found: {cfg.initialData}", file=sys.stderr)
+         sys.exit(1)
 
-   os.makedirs(cfg.runDir,                            exist_ok=True)
+   os.makedirs(cfg.runDir,                               exist_ok=True)
    os.makedirs(os.path.join(cfg.runDir, "trainingdata"), exist_ok=True)
    os.makedirs(os.path.join(cfg.runDir, "models"),       exist_ok=True)
 
@@ -323,8 +373,18 @@ def main ():
    }
    writeJsonAtomic(masterFile(cfg), master)
 
-   currentModel = cfg.initialModel
-   for cycle in range(1, cfg.maxCycles + 1):
+   # Pick the entry path: model start (cycle 1 generates) or data start (cycle 1 trains).
+   if cfg.initialModel is not None:
+      currentModel = cfg.initialModel
+      startCycle = 1
+   else:
+      currentModel, cycleEntry = runFirstCycleFromData(cfg, cfg.initialData)
+      master["cycles"].append(cycleEntry)
+      master["completedAt"] = datetime.datetime.now().isoformat(timespec="seconds")
+      writeJsonAtomic(masterFile(cfg), master)
+      startCycle = 2
+
+   for cycle in range(startCycle, cfg.maxCycles + 1):
       currentModel, cycleEntry = runCycle(cfg, cycle, currentModel)
       master["cycles"].append(cycleEntry)
       master["completedAt"] = datetime.datetime.now().isoformat(timespec="seconds")
