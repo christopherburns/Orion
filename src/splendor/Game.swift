@@ -1,5 +1,6 @@
 import Core
 import Utility
+import Foundation
 
 // Nobles are acquired only with cards, not with gems
 public struct Noble {
@@ -86,8 +87,8 @@ public struct PlayerState {
    }
 
    // Encode player state as a fixed-size array of Float16
-   // Size: 5 (gems) + 1 (goldGems) + 5 (card color counts) + 1 (reserved card count) + 33 (3 reserved cards × 11) + 1 (noble count) + 1 (score) = 47
-   public static let ENCODED_SIZE = 47
+   // Size: 5 (gems) + 1 (goldGems) + 5 (card color counts) + 1 (reserved card count) + 36 (3 reserved cards × 12) + 1 (noble count) + 1 (score) = 50
+   public static let ENCODED_SIZE = 50
 
    public func encoding () -> [Float16] {
       var encoded: [Float16] = []
@@ -97,7 +98,7 @@ public struct PlayerState {
       encoded.append(contentsOf: self.gems.map { Float16($0) / 10.0 })
       encoded.append(Float16(self.goldGems) / 10.0)
 
-      // Record the number of cards owned of each color - this is 5 move values
+      // Record the number of cards owned of each color - this is 5 more values
       var power: [Float16] = Array(repeating: Float16(0), count: GemType.allCases.count)
       for card in self.cards {
          power[card.color.rawValue] += 1.0
@@ -108,7 +109,8 @@ public struct PlayerState {
       encoded.append(Float16(self.reservedCards.count) / 3.0)
       for i in 0..<3 {
          if i < self.reservedCards.count {
-            encoded.append(contentsOf: self.reservedCards[i].encoding())
+            let affordable = self.canAfford(cost: self.reservedCards[i].price)
+            encoded.append(contentsOf: self.reservedCards[i].encoding(affordable: affordable))
          } else { // Zero-padding for missing reserved cards
             encoded.append(contentsOf: Array(repeating: Float16(0), count: Card.ENCODED_SIZE))
          }
@@ -492,8 +494,13 @@ public struct Game: GameProtocol {
    }
 
    // Encode game state as a fixed-size array of Float16
-   // Size: 188 (4 players × 47) + 5 (supply) + 1 (gold supply) + 30 (5 nobles × 6) + 132 (3 tiers × 4 cards × 11) + 4 (current player one-hot) + 1 (turn) = 361
-   public static let GAME_STATE_ENCODING_SIZE = 357
+   // Size: 200 (4 players × 50) +
+   //         5 (supply gem counts) +
+   //         1 (gold supply gem count) +
+   //        30 (5 nobles × 6) +
+   //       144 (3 tiers × 4 cards × 12) +
+   //         1 (turn) = 381
+   public static let GAME_STATE_ENCODING_SIZE = 381
 
    public func encoding () -> [Float16] {
       var encoded: [Float16] = []
@@ -519,6 +526,7 @@ public struct Game: GameProtocol {
       // 1 gold gem supply count
       encoded.append(Float16(self.goldGemSupply) / 5.0)
 
+      // noble encodings: 30 values
       // 5 available nobles × 6 floats each (1 point + 5 price)
       for i in 0..<5 {
          if i < self.nobles.count {
@@ -531,11 +539,13 @@ public struct Game: GameProtocol {
          }
       }
 
-      // 3 tiers × 4 visible cards × 11 floats each (1 point + 5 price + 5 color one-hot)
+      // visible card encodings: 144 values
+      // 3 tiers × 4 visible cards × 12 floats each (1 point value, 5 price values, 5 color one-hot, 1 affordability flag)
       for tier in 0..<3 {
          for position in 0..<4 {
             if tier < self.cardDecks.count && position < self.cardDecks[tier].count {
-               encoded.append(contentsOf: self.cardDecks[tier][position].encoding())
+               let x = self.isMoveLegal(.purchaseCard(tier: tier, position: position), forPlayer: currentPlayer)
+               encoded.append(contentsOf: self.cardDecks[tier][position].encoding(affordable: x))
             } else {
                // Zero-padding for missing cards
                encoded.append(contentsOf: Array(repeating: Float16(0), count: Card.ENCODED_SIZE))
@@ -543,8 +553,8 @@ public struct Game: GameProtocol {
          }
       }
 
-      // 1 current turn (normalized, assuming max 100 turns)
-      encoded.append(Float16(self.currentTurn) / 100.0)
+      // 1: current turn (normalized to a 100-turn game)
+      encoded.append(Float16(tanh(Float(self.currentTurn))))
 
       precondition(encoded.count == Game.GAME_STATE_ENCODING_SIZE, "Encoded size mismatch: expected \(Game.GAME_STATE_ENCODING_SIZE), got \(encoded.count)")
       return encoded

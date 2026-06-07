@@ -161,10 +161,10 @@ public struct Card {
    }
 
    // Encode card state as a fixed-size array of Float16
-   // Size: 1 (points) + 5 (price) + 5 (color one-hot) = 11
-   public static let ENCODED_SIZE = 11
+   // Size: 1 (points) + 5 (price) + 5 (color one-hot) + 1 (affordability flag) = 11
+   public static let ENCODED_SIZE = 12
 
-   public func encoding () -> [Float16] {
+   public func encoding (affordable: Bool) -> [Float16] {
       var encoded: [Float16] = []
 
       // 1 point value (normalized by 10.0 to match gem normalization)
@@ -177,6 +177,9 @@ public struct Card {
       var colorOneHot = Array(repeating: Float16(0), count: GemType.allCases.count)
       colorOneHot[self.color.rawValue] = 1.0
       encoded.append(contentsOf: colorOneHot)
+
+      // 1 affordability flag
+      encoded.append(affordable ? 1.0 : 0.0)
 
       precondition(encoded.count == Card.ENCODED_SIZE, "Encoded size mismatch: expected \(Card.ENCODED_SIZE), got \(encoded.count)")
       return encoded
