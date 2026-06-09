@@ -497,10 +497,10 @@ public struct Game: GameProtocol {
    // Size: 200 (4 players × 50) +
    //         5 (supply gem counts) +
    //         1 (gold supply gem count) +
-   //        30 (5 nobles × 6) +
+   //       130 (5 nobles × 26: 1 point + 5 price + 4 players × 5 per-color deficits) +
    //       144 (3 tiers × 4 cards × 12) +
-   //         1 (turn) = 381
-   public static let GAME_STATE_ENCODING_SIZE = 381
+   //         1 (turn) = 481
+   public static let GAME_STATE_ENCODING_SIZE = 481
 
    public func encoding () -> [Float16] {
       var encoded: [Float16] = []
@@ -526,16 +526,34 @@ public struct Game: GameProtocol {
       // 1 gold gem supply count
       encoded.append(Float16(self.goldGemSupply) / 5.0)
 
-      // noble encodings: 30 values
-      // 5 available nobles × 6 floats each (1 point + 5 price)
+      // noble encodings: 130 values
+      // 5 available nobles × 26 floats each (1 point + 5 price + 4 players × 5 per-color deficits)
+      let NOBLE_ENCODING_SIZE = 26
       for i in 0..<5 {
          if i < self.nobles.count {
             let noble = self.nobles[i]
             encoded.append(Float16(noble.points)/3.0)
             encoded.append(contentsOf: noble.price.map { Float16($0)/4.0 })
+
+            // For each player, record per-color deficit toward acquiring this noble.
+            // Deficit = max(0, noble price - player's card count of that color); gold gems
+            // don't help here because nobles require cards, not gems.
+            for playerSlot in 0..<4 {
+               let playerIndex = (self.currentPlayer + playerSlot) % self.players.count
+               if playerSlot < n {
+                  let cardBasedPurchasePower = self.players[playerIndex].cardBasedPurchasePower()
+                  for colorIndex in GemType.allCases.indices {
+                     let deficit = max(0, noble.price[colorIndex] - cardBasedPurchasePower[colorIndex])
+                     encoded.append(Float16(deficit) / 4.0)
+                  }
+               }
+               else { // zero-padding for missing players' deficit vector
+                  encoded.append(contentsOf: Array(repeating: Float16(0), count: GemType.allCases.count))
+               }
+            }
          } else {
             // Zero-padding for missing nobles
-            encoded.append(contentsOf: Array(repeating: Float16(0), count: 6))
+            encoded.append(contentsOf: Array(repeating: Float16(0), count: NOBLE_ENCODING_SIZE))
          }
       }
 
@@ -553,7 +571,7 @@ public struct Game: GameProtocol {
          }
       }
 
-      // 1: current turn (normalized to a 100-turn game)
+      // 1: current turn
       encoded.append(Float16(tanh(Float(self.currentTurn))))
 
       precondition(encoded.count == Game.GAME_STATE_ENCODING_SIZE, "Encoded size mismatch: expected \(Game.GAME_STATE_ENCODING_SIZE), got \(encoded.count)")
