@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Iterative self-play training loop for Orion.
 
-Starts from EITHER an existing model (cycle 1 generates fresh data from it) OR
-an existing training dataset (cycle 1 skips generation and trains directly on
-the supplied data). All subsequent cycles are full generate → train → evaluate
-loops gated by a win-rate threshold vs. the current champion.
+Starts from EITHER an existing model (generation 1 generates fresh data from it)
+OR an existing training dataset (generation 1 skips generation and trains
+directly on the supplied data). All subsequent generations are full
+generate → train → evaluate loops gated by a win-rate threshold vs. the current
+champion.
 
 All outputs for this run land under RUN_DIR (created if missing): generated
 training data under RUN_DIR/trainingdata/, saved models under RUN_DIR/models/,
-per-call reports as RUN_DIR/cycle_NN_*.json, and the master aggregate as
-RUN_DIR/run.json. The master file is rewritten atomically after every cycle.
+per-call reports as RUN_DIR/gen_NN_*.json, and the master aggregate as
+RUN_DIR/run.json. The master file is rewritten atomically after every generation.
 
 Exactly one of --initial-model or --initial-data must be supplied.
 
@@ -17,28 +18,28 @@ Usage:
    iterative_gameplay.py RUN_DIR (--initial-model PATH | --initial-data PATH) [options]
 
 Options:
-   --initial-model PATH    Initial model to start self-play from (cycle 1 begins with generate)
-   --initial-data PATH     Initial training data to start from (cycle 1 begins with train; skip generate)
-   --games-per-cycle N     Games to generate per cycle                           [default: 5000]
-   --epochs N              Training epochs per cycle                             [default: 100]
-   --training-batch-size N Training batch size                                   [default: 256]
-   --generate-batch-size N Games to run in parallel during MCTS generation       [default: 128]
-   --cycles N              Total number of cycles to run                         [default: 15]
-   --eval-games N          Games to play when evaluating                         [default: 500]
-   --champion-threshold N  Min win rate vs previous to accept new model (0=off)  [default: 0.52]
-   --early-stopping N      Stop training after N epochs w/out improvement (0=off)[default: 10]
-   --initial-temp TEMP     Sampling temperature for cycle 1                      [default: 1.5]
-   --final-temp TEMP       Sampling temperature for the last cycle               [default: 0.5]
-   --learning-rate R       Learning rate for cycle 1                             [default: 0.0003]
-   --lr-decay R            Multiplicative LR decay per cycle (1.0 = no decay)    [default: 0.95]
-   --weight-decay N        Weight decay rate                                     [default: 0.0]
-   --eval-temp TEMP        Sampling temperature during evaluation (0=greedy)     [default: 0.1]
-   --dropout N             Dropout rate for trunk layers (0=disabled)            [default: 0.1]
-   --monte-carlo-samples N MCTS monteCarloSamples per move (0=disabled)          [default: 25]
-   --c-puct N              MCTS exploration constant                             [default: 1.5]
-   --accumulate-data       Train on all previous cycles' data, not just the latest
-   --binary PATH           Path to the orion binary                              [default: .build/release/orion]
-   -h --help               Show this help message
+   --initial-model PATH        Initial model to start self-play from (gen 1 begins with generate)
+   --initial-data PATH         Initial training data to start from (gen 1 begins with train; skip generate)
+   --games-per-generation N    Games to generate per generation                  [default: 5000]
+   --epochs N                  Training epochs per generation                    [default: 100]
+   --training-batch-size N     Training batch size                               [default: 256]
+   --generate-batch-size N     Games to run in parallel during MCTS generation   [default: 128]
+   --generations N             Total number of generations to run                [default: 15]
+   --eval-games N              Games to play when evaluating                     [default: 500]
+   --champion-threshold N      Min win rate vs previous to accept new model (0=off)   [default: 0.52]
+   --early-stopping N          Stop training after N epochs w/out improvement (0=off) [default: 10]
+   --initial-temp TEMP         Sampling temperature for generation 1             [default: 1.5]
+   --final-temp TEMP           Sampling temperature for the last generation      [default: 0.5]
+   --learning-rate R           Learning rate for generation 1                    [default: 0.0003]
+   --lr-decay R                Multiplicative LR decay per generation (1.0 = no decay) [default: 0.95]
+   --weight-decay N            Weight decay rate                                 [default: 0.0]
+   --eval-temp TEMP            Sampling temperature during evaluation (0=greedy) [default: 0.1]
+   --dropout N                 Dropout rate for trunk layers (0=disabled)        [default: 0.1]
+   --monte-carlo-samples N     MCTS monteCarloSamples per move (0=disabled)      [default: 25]
+   --c-puct N                  MCTS exploration constant                         [default: 1.5]
+   --accumulate-data           Train on all previous generations' data, not just the latest
+   --binary PATH               Path to the orion binary                          [default: .build/release/orion]
+   -h --help                   Show this help message
 """
 
 import datetime
@@ -54,38 +55,39 @@ from docopt import docopt
 
 # ── Terminology ───────────────────────────────────────────────────────────────
 #
-#  Step  — one forward+backward pass through a single batch of training examples.
-#  Epoch — one full pass through the current training dataset (many steps).
-#  Cycle — one full generate → train → evaluate round orchestrated by this script
-#          (many epochs). The model improves and the next cycle's data is generated
-#          by the updated model.
+#  Step       — one forward+backward pass through a single batch of training examples.
+#  Epoch      — one full pass through the current training dataset (many steps).
+#  Generation — one full generate → train → evaluate round orchestrated by this
+#               script (many epochs). The model improves; the next generation's data
+#               is generated by the updated model. A run produces a lineage of N
+#               models, one per accepted generation.
 #
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 @dataclass
 class Config:
-   runDir:            str
-   initialModel:      Optional[str]
-   initialData:       Optional[str]
-   gamesPerCycle:     int
-   epochs:            int
-   trainingBatchSize: int
-   generateBatchSize: int
-   maxCycles:         int
-   evalGames:         int
-   championThreshold: float
-   earlyStopping:     int
-   initialTemp:       float
-   finalTemp:         float
-   learningRate:      float
-   lrDecay:           float
-   weightDecay:       float
-   evalTemp:          float
-   dropout:           float
-   monteCarloSamples: int
-   cPuct:             float
-   accumulateData:    bool
-   binary:            str
+   runDir:              str
+   initialModel:        Optional[str]
+   initialData:         Optional[str]
+   gamesPerGeneration:  int
+   epochs:              int
+   trainingBatchSize:   int
+   generateBatchSize:   int
+   maxGenerations:      int
+   evalGames:           int
+   championThreshold:   float
+   earlyStopping:       int
+   initialTemp:         float
+   finalTemp:           float
+   learningRate:        float
+   lrDecay:             float
+   weightDecay:         float
+   evalTemp:            float
+   dropout:             float
+   monteCarloSamples:   int
+   cPuct:               float
+   accumulateData:      bool
+   binary:              str
 
 
 # ── Shell helpers ──────────────────────────────────────────────────────────────
@@ -139,7 +141,7 @@ def generateData (cfg: Config, outputPath: str, agent: str, temperature: float, 
    args = [
       cfg.binary, "generate",
       "-o", outputPath,
-      "-n", str(cfg.gamesPerCycle),
+      "-n", str(cfg.gamesPerGeneration),
       "-a", agent,
       "-t", f"{temperature:.2f}",
    ]
@@ -181,33 +183,33 @@ def evaluatePlay (cfg: Config, agentSpecs: list[str], reportPath: str) -> Option
    return runOrion(args, "play", reportPath)
 
 
-def cycleLearningRate (cfg: Config, cycle: int) -> float:
-   return cfg.learningRate * (cfg.lrDecay ** (cycle - 1))
+def generationLearningRate (cfg: Config, gen: int) -> float:
+   return cfg.learningRate * (cfg.lrDecay ** (gen - 1))
 
 
-def computeTemperature (cfg: Config, cycle: int) -> float:
-   if cfg.maxCycles <= 1:
+def computeTemperature (cfg: Config, gen: int) -> float:
+   if cfg.maxGenerations <= 1:
       return cfg.finalTemp
-   progress = (cycle - 1) / (cfg.maxCycles - 1)
+   progress = (gen - 1) / (cfg.maxGenerations - 1)
    return cfg.initialTemp - (cfg.initialTemp - cfg.finalTemp) * progress
 
 
 # ── Path helpers ───────────────────────────────────────────────────────────────
 
-def cycleStr (cfg: Config, cycle: int) -> str:
-   width = len(str(cfg.maxCycles))
-   return str(cycle).zfill(width)
+def genStr (cfg: Config, gen: int) -> str:
+   width = len(str(cfg.maxGenerations))
+   return str(gen).zfill(width)
 
-def modelPath (cfg: Config, cycle: int) -> str:
-   return f"{cfg.runDir}/models/model_c{cycleStr(cfg, cycle)}_e{cfg.epochs}_b{cfg.trainingBatchSize}"
+def modelPath (cfg: Config, gen: int) -> str:
+   return f"{cfg.runDir}/models/model_g{genStr(cfg, gen)}_e{cfg.epochs}_b{cfg.trainingBatchSize}"
 
-def dataPath (cfg: Config, cycle: int) -> str:
-   """Path for data generated by the model at the START of `cycle` (the previous
-   champion). Cycle 1's data is generated by the bootstrap model and labelled c00."""
-   return f"{cfg.runDir}/trainingdata/data_c{cycleStr(cfg, cycle - 1)}_{cfg.gamesPerCycle}"
+def dataPath (cfg: Config, gen: int) -> str:
+   """Path for data generated by the model at the START of `gen` (the previous
+   champion). Generation 1's data is generated by the bootstrap model and labelled g00."""
+   return f"{cfg.runDir}/trainingdata/data_g{genStr(cfg, gen - 1)}_{cfg.gamesPerGeneration}"
 
-def reportFile (cfg: Config, cycle: int, kind: str) -> str:
-   return f"{cfg.runDir}/cycle_{cycleStr(cfg, cycle)}_{kind}.json"
+def reportFile (cfg: Config, gen: int, kind: str) -> str:
+   return f"{cfg.runDir}/gen_{genStr(cfg, gen)}_{kind}.json"
 
 def masterFile (cfg: Config) -> str:
    return f"{cfg.runDir}/run.json"
@@ -215,17 +217,17 @@ def masterFile (cfg: Config) -> str:
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
-def runCycle (cfg: Config, cycle: int, prevModel: str) -> tuple[str, dict]:
-   """One self-play cycle. Returns (next champion path, cycle entry dict for the master record)."""
-   temp = computeTemperature(cfg, cycle)
-   lr = cycleLearningRate(cfg, cycle)
-   print(f"\n=== Cycle {cycle} (temperature: {temp:.2f}, LR: {lr:.6f}) ===")
+def runGeneration (cfg: Config, gen: int, prevModel: str) -> tuple[str, dict]:
+   """One self-play generation. Returns (next champion path, generation entry dict for the master record)."""
+   temp = computeTemperature(cfg, gen)
+   lr = generationLearningRate(cfg, gen)
+   print(f"\n=== Generation {gen} (temperature: {temp:.2f}, LR: {lr:.6f}) ===")
 
-   data = dataPath(cfg, cycle)
-   currentModel = modelPath(cfg, cycle)
+   data = dataPath(cfg, gen)
+   currentModel = modelPath(cfg, gen)
 
-   print(f"Generating {cfg.gamesPerCycle} games with {prevModel}...")
-   generateReport = generateData(cfg, data, f"{prevModel}/", temp, reportFile(cfg, cycle, "generate"))
+   print(f"Generating {cfg.gamesPerGeneration} games with {prevModel}...")
+   generateReport = generateData(cfg, data, f"{prevModel}/", temp, reportFile(cfg, gen, "generate"))
    if generateReport is None:
       sys.exit(1)
 
@@ -233,25 +235,25 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> tuple[str, dict]:
    trainingInput = f"{cfg.runDir}/trainingdata" if cfg.accumulateData else f"{data}.bin.lz4"
    trainReport = trainModel(cfg, trainingInput, currentModel, lr,
                             prevModelPath=f"{prevModel}/",
-                            reportPath=reportFile(cfg, cycle, "train"))
+                            reportPath=reportFile(cfg, gen, "train"))
    if trainReport is None:
       sys.exit(1)
 
    print("Evaluating model vs random...")
    evalRandomReport = evaluatePlay(cfg, [f"{currentModel}/", "random"],
-                                   reportFile(cfg, cycle, "eval_vs_random"))
+                                   reportFile(cfg, gen, "eval_vs_random"))
    if evalRandomReport is None:
       sys.exit(1)
 
    print("Evaluating model vs heuristic...")
    evalHeuristicReport = evaluatePlay(cfg, [f"{currentModel}/", "heuristic"],
-                                      reportFile(cfg, cycle, "eval_vs_heuristic"))
+                                      reportFile(cfg, gen, "eval_vs_heuristic"))
    if evalHeuristicReport is None:
       sys.exit(1)
 
    print(f"Evaluating model vs {prevModel}...")
    evalPrevReport = evaluatePlay(cfg, [f"{currentModel}/", f"{prevModel}/"],
-                                 reportFile(cfg, cycle, "eval_vs_prev"))
+                                 reportFile(cfg, gen, "eval_vs_prev"))
    if evalPrevReport is None:
       sys.exit(1)
 
@@ -265,8 +267,8 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> tuple[str, dict]:
       else:
          print(f"New model win rate {winRateVsPrev:.1%} >= threshold {cfg.championThreshold:.1%} — accepting new champion")
 
-   cycleEntry = {
-      "cycleIndex":        cycle,
+   genEntry = {
+      "generationIndex":   gen,
       "previousModel":     prevModel,
       "trainedModel":      currentModel,
       "temperature":       temp,
@@ -281,42 +283,42 @@ def runCycle (cfg: Config, cycle: int, prevModel: str) -> tuple[str, dict]:
    }
 
    nextChampion = currentModel if accepted else prevModel
-   return nextChampion, cycleEntry
+   return nextChampion, genEntry
 
 
-def runFirstCycleFromData (cfg: Config, dataPath: str) -> tuple[str, dict]:
-   """Cycle 1 when starting from a data file: skip generation, train from scratch
-   on the supplied data, evaluate against random and heuristic (no champion to
-   compare to yet)."""
-   cycle = 1
-   lr = cycleLearningRate(cfg, cycle)
-   print(f"\n=== Cycle {cycle} (training on supplied data, LR: {lr:.6f}) ===")
+def runFirstGenerationFromData (cfg: Config, dataPath: str) -> tuple[str, dict]:
+   """Generation 1 when starting from a data file: skip generation, train from
+   scratch on the supplied data, evaluate against random and heuristic (no
+   champion to compare to yet)."""
+   gen = 1
+   lr = generationLearningRate(cfg, gen)
+   print(f"\n=== Generation {gen} (training on supplied data, LR: {lr:.6f}) ===")
 
-   currentModel = modelPath(cfg, cycle)
+   currentModel = modelPath(cfg, gen)
    print(f"Training model from scratch on {dataPath}...")
    trainReport = trainModel(cfg, dataPath, currentModel, lr,
                             prevModelPath=None,
-                            reportPath=reportFile(cfg, cycle, "train"))
+                            reportPath=reportFile(cfg, gen, "train"))
    if trainReport is None:
       sys.exit(1)
 
    print("Evaluating model vs random...")
    evalRandomReport = evaluatePlay(cfg, [f"{currentModel}/", "random"],
-                                   reportFile(cfg, cycle, "eval_vs_random"))
+                                   reportFile(cfg, gen, "eval_vs_random"))
    if evalRandomReport is None:
       sys.exit(1)
 
    print("Evaluating model vs heuristic...")
    evalHeuristicReport = evaluatePlay(cfg, [f"{currentModel}/", "heuristic"],
-                                      reportFile(cfg, cycle, "eval_vs_heuristic"))
+                                      reportFile(cfg, gen, "eval_vs_heuristic"))
    if evalHeuristicReport is None:
       sys.exit(1)
 
-   cycleEntry = {
-      "cycleIndex":        cycle,
+   genEntry = {
+      "generationIndex":   gen,
       "previousModel":     None,
       "trainedModel":      currentModel,
-      "temperature":       None,        # no generate this cycle
+      "temperature":       None,        # no generate this generation
       "learningRate":      lr,
       "winRateVsPrev":     None,        # no champion to compare against
       "championAccepted":  True,        # always accepted; it's the first
@@ -326,33 +328,33 @@ def runFirstCycleFromData (cfg: Config, dataPath: str) -> tuple[str, dict]:
       "evalVsHeuristic":   evalHeuristicReport,
       "evalVsPrev":        None,
    }
-   return currentModel, cycleEntry
+   return currentModel, genEntry
 
 
 def configFromArgs (args: dict) -> Config:
    return Config(
-      runDir             = args["RUN_DIR"],
-      initialModel       = args["--initial-model"],
-      initialData        = args["--initial-data"],
-      gamesPerCycle      = int(args["--games-per-cycle"]),
-      epochs             = int(args["--epochs"]),
-      trainingBatchSize  = int(args["--training-batch-size"]),
-      generateBatchSize  = int(args["--generate-batch-size"]),
-      maxCycles          = int(args["--cycles"]),
-      evalGames          = int(args["--eval-games"]),
-      championThreshold  = float(args["--champion-threshold"]),
-      earlyStopping      = int(args["--early-stopping"]),
-      initialTemp        = float(args["--initial-temp"]),
-      finalTemp          = float(args["--final-temp"]),
-      learningRate       = float(args["--learning-rate"]),
-      lrDecay            = float(args["--lr-decay"]),
-      weightDecay        = float(args["--weight-decay"]),
-      evalTemp           = float(args["--eval-temp"]),
-      dropout            = float(args["--dropout"]),
-      monteCarloSamples  = int(args["--monte-carlo-samples"]),
-      cPuct              = float(args["--c-puct"]),
-      accumulateData     = bool(args["--accumulate-data"]),
-      binary             = args["--binary"],
+      runDir              = args["RUN_DIR"],
+      initialModel        = args["--initial-model"],
+      initialData         = args["--initial-data"],
+      gamesPerGeneration  = int(args["--games-per-generation"]),
+      epochs              = int(args["--epochs"]),
+      trainingBatchSize   = int(args["--training-batch-size"]),
+      generateBatchSize   = int(args["--generate-batch-size"]),
+      maxGenerations      = int(args["--generations"]),
+      evalGames           = int(args["--eval-games"]),
+      championThreshold   = float(args["--champion-threshold"]),
+      earlyStopping       = int(args["--early-stopping"]),
+      initialTemp         = float(args["--initial-temp"]),
+      finalTemp           = float(args["--final-temp"]),
+      learningRate        = float(args["--learning-rate"]),
+      lrDecay             = float(args["--lr-decay"]),
+      weightDecay         = float(args["--weight-decay"]),
+      evalTemp            = float(args["--eval-temp"]),
+      dropout             = float(args["--dropout"]),
+      monteCarloSamples   = int(args["--monte-carlo-samples"]),
+      cPuct               = float(args["--c-puct"]),
+      accumulateData      = bool(args["--accumulate-data"]),
+      binary              = args["--binary"],
    )
 
 
@@ -387,24 +389,24 @@ def main ():
       "startedAt":      datetime.datetime.now().isoformat(timespec="seconds"),
       "completedAt":    None,
       "config":         asdict(cfg),
-      "cycles":         [],
+      "generations":    [],
    }
    writeJsonAtomic(masterFile(cfg), master)
 
-   # Pick the entry path: model start (cycle 1 generates) or data start (cycle 1 trains).
+   # Pick the entry path: model start (gen 1 generates) or data start (gen 1 trains).
    if cfg.initialModel is not None:
       currentModel = cfg.initialModel
-      startCycle = 1
+      startGen = 1
    else:
-      currentModel, cycleEntry = runFirstCycleFromData(cfg, cfg.initialData)
-      master["cycles"].append(cycleEntry)
+      currentModel, genEntry = runFirstGenerationFromData(cfg, cfg.initialData)
+      master["generations"].append(genEntry)
       master["completedAt"] = datetime.datetime.now().isoformat(timespec="seconds")
       writeJsonAtomic(masterFile(cfg), master)
-      startCycle = 2
+      startGen = 2
 
-   for cycle in range(startCycle, cfg.maxCycles + 1):
-      currentModel, cycleEntry = runCycle(cfg, cycle, currentModel)
-      master["cycles"].append(cycleEntry)
+   for gen in range(startGen, cfg.maxGenerations + 1):
+      currentModel, genEntry = runGeneration(cfg, gen, currentModel)
+      master["generations"].append(genEntry)
       master["completedAt"] = datetime.datetime.now().isoformat(timespec="seconds")
       writeJsonAtomic(masterFile(cfg), master)
 

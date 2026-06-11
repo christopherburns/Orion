@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Summarize an iterative_gameplay run.json as a flat table.
 
-Reads the master run.json and prints one row per cycle, showing win rates
+Reads the master run.json and prints one row per generation, showing win rates
 against each evaluation opponent, the best training losses, average turn
 counts in the generated training data, and average turn counts in eval play.
 
@@ -16,26 +16,26 @@ from pathlib import Path
 
 # ── Cell extractors ────────────────────────────────────────────────────────────
 
-def winRate (cycle, evalKey):
+def winRate (gen, evalKey):
    """Decisive-game win rate for the trained model in the named eval, or None."""
-   e = cycle.get(evalKey)
+   e = gen.get(evalKey)
    if e is None:
       return None
    return e["results"]["perPlayer"][0]["winRateOverDecisive"]
 
 
-def avgEvalTurns (cycle):
-   """Mean avg-turns-per-game across whatever eval opponents this cycle has."""
+def avgEvalTurns (gen):
+   """Mean avg-turns-per-game across whatever eval opponents this generation has."""
    keys = ("evalVsRandom", "evalVsHeuristic", "evalVsPrev")
-   turns = [cycle[k]["results"]["avgTurnsPerGame"]
-            for k in keys if cycle.get(k) is not None]
+   turns = [gen[k]["results"]["avgTurnsPerGame"]
+            for k in keys if gen.get(k) is not None]
    return sum(turns) / len(turns) if turns else None
 
 
-def trainDataTurns (cycle):
-   """Average turns per game in this cycle's generated training data, or None
-   for the data-start first cycle (no generation happened)."""
-   g = cycle.get("generate")
+def trainDataTurns (gen):
+   """Average turns per game in this generation's generated training data, or
+   None for the data-start first generation (no generation step happened)."""
+   g = gen.get("generate")
    return g["results"]["avgExamplesPerGame"] if g else None
 
 
@@ -65,7 +65,7 @@ def main ():
 
    print(f"Run:      {r.get('runDir', '?')}")
    print(f"Started:  {r.get('startedAt', '?')}")
-   print(f"Config:   games/cycle={cfg.get('gamesPerCycle')}  "
+   print(f"Config:   games/gen={cfg.get('gamesPerGeneration')}  "
          f"mc={cfg.get('monteCarloSamples')}  epochs={cfg.get('epochs')}  "
          f"batch={cfg.get('trainingBatchSize')}  lr={cfg.get('learningRate')}  "
          f"eval-games={cfg.get('evalGames')}  accumulate={cfg.get('accumulateData')}")
@@ -77,18 +77,18 @@ def main ():
    print(header)
    print("-" * len(header))
 
-   for c in r.get("cycles", []):
-      gate = "yes" if c.get("championAccepted") else " no"
-      train = c.get("train", {}).get("results", {})
-      row = (f"{c['cycleIndex']:>3}  "
-             f"{pct(winRate(c, 'evalVsRandom')):>7}  "
-             f"{pct(winRate(c, 'evalVsHeuristic')):>7}  "
-             f"{pct(winRate(c, 'evalVsPrev')):>7}  "
+   for g in r.get("generations", []):
+      gate = "yes" if g.get("championAccepted") else " no"
+      train = g.get("train", {}).get("results", {})
+      row = (f"{g['generationIndex']:>3}  "
+             f"{pct(winRate(g, 'evalVsRandom')):>7}  "
+             f"{pct(winRate(g, 'evalVsHeuristic')):>7}  "
+             f"{pct(winRate(g, 'evalVsPrev')):>7}  "
              f"{gate:>4}  "
              f"{num(train.get('bestValidationPolicyLoss')):>7}  "
              f"{num(train.get('bestValidationValueLoss')):>7}  "
-             f"{num(trainDataTurns(c), '.1f'):>9}  "
-             f"{num(avgEvalTurns(c), '.1f'):>9}")
+             f"{num(trainDataTurns(g), '.1f'):>9}  "
+             f"{num(avgEvalTurns(g), '.1f'):>9}")
       print(row)
 
 
