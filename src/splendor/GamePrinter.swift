@@ -56,12 +56,12 @@ public class GamePrinter {
       var lines: [String] = []
       let cardColorCode = cardColor(card.color)
       let cardWidth = 14
-      let maxPriceLines = 5 // Fixed number of price lines for alignment
+      let maxPriceLines = 4 // Standard Splendor cards have at most 4 colors of price
 
       // Top border
       lines.append("┌" + String(repeating: "─", count: cardWidth - 2) + "┐")
 
-      // Points line (centered)
+      // Points line (centered) — empty for 0-point cards but slot reserved for alignment
       if card.points > 0 {
          let pointsStr = "\(bold)\(card.points) pts\(reset)"
          let padding = cardWidth - 2 - visualWidth(pointsStr)
@@ -72,10 +72,7 @@ public class GamePrinter {
          lines.append("│" + String(repeating: " ", count: cardWidth - 2) + "│")
       }
 
-      // Empty line
-      lines.append("│" + String(repeating: " ", count: cardWidth - 2) + "│")
-
-      // Price section - show each gem type with colored squares (fixed height)
+      // Price section — one line per non-zero color, padded to fixed height
       var priceLines: [String] = []
       for (gemIndex, count) in card.price.enumerated() {
          if count > 0 {
@@ -83,25 +80,17 @@ public class GamePrinter {
             let colorCode = gemColor(gem)
             let squares = String(repeating: "■", count: count)
             let countStr = "\(count)"
-            // Left side: colored squares, right side: count number
             let squaresWidth = visualWidth("\(colorCode)\(squares)\(reset)")
             let countWidth = visualWidth(countStr)
-            let padding = cardWidth - 4 - squaresWidth - countWidth // -4 for: │, leading space, trailing space, │
+            let padding = cardWidth - 4 - squaresWidth - countWidth
             let priceLine = " \(colorCode)\(squares)\(reset)" + String(repeating: " ", count: max(0, padding)) + countStr
             priceLines.append("│" + priceLine + " │")
          }
       }
-
-      // Pad price section to fixed height
       while priceLines.count < maxPriceLines {
          priceLines.append("│" + String(repeating: " ", count: cardWidth - 2) + "│")
       }
-
-      // Take only maxPriceLines to ensure fixed height
       lines.append(contentsOf: priceLines.prefix(maxPriceLines))
-
-      // Empty line
-      lines.append("│" + String(repeating: " ", count: cardWidth - 2) + "│")
 
       // Color line (centered)
       let colorName = card.color.stringValue
@@ -113,6 +102,47 @@ public class GamePrinter {
 
       // Bottom border
       lines.append("└" + String(repeating: "─", count: cardWidth - 2) + "┘")
+
+      return lines.joined(separator: "\n")
+   }
+
+   /// Render a noble as a small box: 6 lines × 12 chars wide.
+   /// Noble layout: ┌──┐ / points / 3 price lines (variable colors, max 3) / └──┘
+   private static func formatNoble (_ noble: Noble) -> String {
+      let nobleWidth = 12
+      let maxPriceLines = 3 // Standard nobles have 2 or 3 colors of price
+      var lines: [String] = []
+
+      // Top border
+      lines.append("┌" + String(repeating: "─", count: nobleWidth - 2) + "┐")
+
+      // Points (centered)
+      let pointsStr = "\(bold)\(noble.points) pts\(reset)"
+      let pointsPad = nobleWidth - 2 - visualWidth(pointsStr)
+      let pointsLeft = pointsPad / 2
+      let pointsRight = pointsPad - pointsLeft
+      lines.append("│" + String(repeating: " ", count: pointsLeft) + pointsStr + String(repeating: " ", count: pointsRight) + "│")
+
+      // Price section (only non-zero colors, padded to maxPriceLines)
+      var priceLines: [String] = []
+      for (gemIndex, count) in noble.price.enumerated() {
+         if count > 0 {
+            let gem = GemType(rawValue: gemIndex)!
+            let colorCode = gemColor(gem)
+            let squares = String(repeating: "■", count: count)
+            let squaresWidth = visualWidth("\(colorCode)\(squares)\(reset)")
+            let countStr = "\(count)"
+            let pad = nobleWidth - 4 - squaresWidth - visualWidth(countStr)
+            priceLines.append("│ \(colorCode)\(squares)\(reset)" + String(repeating: " ", count: max(0, pad)) + "\(countStr) │")
+         }
+      }
+      while priceLines.count < maxPriceLines {
+         priceLines.append("│" + String(repeating: " ", count: nobleWidth - 2) + "│")
+      }
+      lines.append(contentsOf: priceLines.prefix(maxPriceLines))
+
+      // Bottom border
+      lines.append("└" + String(repeating: "─", count: nobleWidth - 2) + "┘")
 
       return lines.joined(separator: "\n")
    }
@@ -449,7 +479,7 @@ public class GamePrinter {
          let card = game.cardDecks[tier][position]
          let cc = cardColor(card.color)
          let pts = card.points > 0 ? "\(card.points)pt" : "0pt"
-         return "Purchase tier-\(tier + 1) \(cc)\(card.color.stringValue)\(reset) card [\(pts), produces \(cc)■\(reset), costs \(costString(card.price))]"
+         return "Purchase tier-\(tier + 1) \(cc)\(card.color.stringValue)\(reset) card [\(pts), costs \(costString(card.price))]"
 
       case .purchaseReservedCard(let position):
          let player = game.players[game.currentPlayer]
@@ -459,7 +489,7 @@ public class GamePrinter {
          let card = player.reservedCards[position]
          let cc = cardColor(card.color)
          let pts = card.points > 0 ? "\(card.points)pt" : "0pt"
-         return "Purchase reserved \(cc)\(card.color.stringValue)\(reset) card [\(pts), produces \(cc)■\(reset), costs \(costString(card.price))]"
+         return "Purchase reserved \(cc)\(card.color.stringValue)\(reset) card [\(pts), costs \(costString(card.price))]"
 
       case .takeThreeGems(let gems):
          let available = gems.filter { game.supply[$0, default: 0] > 0 }
@@ -480,7 +510,7 @@ public class GamePrinter {
          let card = game.cardDecks[tier][position]
          let cc = cardColor(card.color)
          let pts = card.points > 0 ? "\(card.points)pt" : "0pt"
-         return "Reserve tier-\(tier + 1) \(cc)\(card.color.stringValue)\(reset) card [\(pts), produces \(cc)■\(reset), costs \(costString(card.price))] + \(brightYellow)★\(reset) gold"
+         return "Reserve tier-\(tier + 1) \(cc)\(card.color.stringValue)\(reset) card [\(pts), costs \(costString(card.price))] + \(brightYellow)★\(reset) gold"
 
       case .discardGem(let gemType):
          let player = game.players[game.currentPlayer]
@@ -612,6 +642,284 @@ public class GamePrinter {
       case .discardGoldGem:
          return "Discard gold"
       }
+   }
+
+
+   // ════════════════════════════════════════════════════════════════════════
+   // Interactive 2-player layout
+   //
+   //   ┌─ Players ─────────────────┐  ┌─ Game Board ──────────────┐
+   //   │ Opponent on top            │  │  tiers, supply, nobles    │
+   //   │ ───────                    │  │                            │
+   //   │ Current player on bottom   │  │                            │
+   //   └────────────────────────────┘  └────────────────────────────┘
+   //   ┌─ Moves (full width) ────────────────────────────────────────┐
+   //   │ sorted/legal moves                                          │
+   //   └─────────────────────────────────────────────────────────────┘
+   //
+   // Top region's height is governed by whichever side panel is taller.
+   // Bottom region is full width (player width + gap + board width).
+   // ════════════════════════════════════════════════════════════════════════
+
+   private static let PLAYER_PANEL_WIDTH = 84  // fits 5 fused-card color columns (5×14 + 4×2 = 78) + 2-space indent + 4 border = 84
+   private static let BOARD_PANEL_WIDTH  = 80
+   private static let TOP_PANEL_GAP      = 2
+   private static let MOVES_PANEL_WIDTH  = PLAYER_PANEL_WIDTH + TOP_PANEL_GAP + BOARD_PANEL_WIDTH
+
+   /// Pad `s` (which may contain ANSI escape codes) on the right to a target visual width.
+   private static func padRight (_ s: String, _ width: Int) -> String {
+      let n = width - visualWidth(s)
+      return n > 0 ? s + String(repeating: " ", count: n) : s
+   }
+
+   /// Wrap a list of content lines in a titled box of fixed outer width.
+   /// Title sits in the top border like `┌─ Title ─────┐`.
+   private static func boxed (title: String, content: [String], width: Int) -> [String] {
+      var lines: [String] = []
+      let titlePart = " \(bold)\(title)\(reset) "
+      let titleVis = visualWidth(titlePart)
+      let trailing = max(0, width - 4 - titleVis) // -4: "┌─" (2) + "─┐" (2)
+      lines.append("┌─" + titlePart + String(repeating: "─", count: trailing) + "─┐")
+      let innerWidth = width - 4 // -4: "│ " left, " │" right
+      for c in content {
+         lines.append("│ " + padRight(c, innerWidth) + " │")
+      }
+      lines.append("└" + String(repeating: "─", count: width - 2) + "┘")
+      return lines
+   }
+
+   /// Place two panels (lists of lines) side-by-side with a small gap.
+   /// Shorter panel is padded with blank lines at the bottom so both columns
+   /// extend the same number of rows.
+   private static func joinHorizontal (_ left: [String], _ right: [String], gap: Int = TOP_PANEL_GAP) -> [String] {
+      let height = max(left.count, right.count)
+      let leftWidth = left.map { visualWidth($0) }.max() ?? 0
+      var out: [String] = []
+      for i in 0..<height {
+         let l = i < left.count  ? left[i]  : ""
+         let r = i < right.count ? right[i] : ""
+         out.append(padRight(l, leftWidth) + String(repeating: " ", count: gap) + r)
+      }
+      return out
+   }
+
+   // ── Panel builders (each returns the panel's lines including its border) ──
+
+   /// Build the content lines for ONE player's section (no outer border).
+   /// `isCurrentTurn` adds a small marker after the player number; positions are fixed
+   /// (player 0 always on top, player 1 always on bottom) so the marker is the only
+   /// turn-by-turn change in the player stack.
+   private static func playerSection (player: PlayerState, playerIndex: Int, isCurrentTurn: Bool) -> [String] {
+      var lines: [String] = []
+
+      // Header
+      let turnMarker = isCurrentTurn ? "  \(brightYellow)◀ to move\(reset)" : ""
+      lines.append("\(bold)Player \(playerIndex)\(reset)\(turnMarker)   "
+         + "Score: \(bold)\(player.score)\(reset)/15   "
+         + "Cards: \(player.cards.count)   Gems: \(player.gemCount)/10")
+
+      // Owned cards as per-color fused columns (the old style)
+      if player.cards.isEmpty {
+         lines.append("")
+         lines.append("  \(dim)(no cards)\(reset)")
+      } else {
+         var byColor: [GemType: [Card]] = [:]
+         for card in player.cards { byColor[card.color, default: []].append(card) }
+         let colors = GemType.allCases.filter { byColor[$0] != nil }
+         let colorGroups = colors.map { formatCardsFused(byColor[$0]!) }
+         let maxHeight = colorGroups.map { $0.count }.max() ?? 0
+         for i in 0..<maxHeight {
+            var row = "  "
+            for (idx, group) in colorGroups.enumerated() {
+               row += i < group.count ? group[i] : String(repeating: " ", count: 14)
+               if idx < colorGroups.count - 1 { row += "  " }
+            }
+            lines.append(row)
+         }
+      }
+
+      // Gem inventory line (compact, only non-zero entries)
+      let gemEntries = player.gems.enumerated().compactMap { (idx, n) -> String? in
+         guard n > 0 else { return nil }
+         let gem = GemType(rawValue: idx)!
+         return "\(gemColor(gem))\(gem.stringValue):\(n)\(reset)"
+      }
+      var gemLine = "  Gems: " + (gemEntries.isEmpty ? "\(dim)(none)\(reset)" : gemEntries.joined(separator: "  "))
+      if player.goldGems > 0 {
+         gemLine += "   \(yellow)★:\(player.goldGems)\(reset)"
+      }
+      lines.append(gemLine)
+
+      // Nobles claimed
+      if !player.nobles.isEmpty {
+         lines.append("  Nobles: \(player.nobles.count)  (+\(player.nobles.reduce(0) { $0 + $1.points }) pts)")
+      }
+
+      // Reserved cards (full card visuals)
+      if !player.reservedCards.isEmpty {
+         lines.append("  \(bold)Reserved:\(reset)")
+         let cardLines = player.reservedCards.map { formatCard($0) }
+         let cardArrays = cardLines.map { $0.split(separator: "\n").map(String.init) }
+         let maxLines = cardArrays.map { $0.count }.max() ?? 0
+         for i in 0..<maxLines {
+            var row = "  "
+            for (idx, arr) in cardArrays.enumerated() {
+               row += i < arr.count ? arr[i] : String(repeating: " ", count: 14)
+               if idx < cardArrays.count - 1 { row += "  " }
+            }
+            lines.append(row)
+         }
+      }
+
+      return lines
+   }
+
+   /// Combined player-stack panel: Player 0 always on top, Player 1 always on
+   /// bottom. The `◀ to move` marker on the header line is the only visual change
+   /// from turn to turn — sections themselves don't swap positions.
+   private static func panelPlayersStack (game: Game) -> [String] {
+      let innerWidth = PLAYER_PANEL_WIDTH - 4
+      let divider = String(repeating: "─", count: innerWidth)
+      var content: [String] = []
+      content.append(contentsOf: playerSection(player: game.players[0], playerIndex: 0,
+                                               isCurrentTurn: game.currentPlayer == 0))
+      content.append("")
+      content.append(divider)
+      content.append("")
+      content.append(contentsOf: playerSection(player: game.players[1], playerIndex: 1,
+                                               isCurrentTurn: game.currentPlayer == 1))
+      return boxed(title: "Players", content: content, width: PLAYER_PANEL_WIDTH)
+   }
+
+   private static func panelBoard (_ game: Game) -> [String] {
+      var content: [String] = []
+
+      // Three tiers, each a row of 4 cards
+      for tier in (0..<3).reversed() {
+         content.append("\(bold)Tier \(tier + 1)\(reset)")
+         let visible = Array(game.cardDecks[tier].prefix(4))
+         if visible.isEmpty {
+            content.append("  (deck empty)")
+            content.append("")
+            continue
+         }
+         let cardLines = visible.map { formatCard($0) }
+         let cardLineArrays = cardLines.map { $0.split(separator: "\n").map(String.init) }
+         let maxLines = cardLineArrays.map { $0.count }.max() ?? 0
+         for i in 0..<maxLines {
+            var row = ""
+            for (idx, arr) in cardLineArrays.enumerated() {
+               row += i < arr.count ? arr[i] : String(repeating: " ", count: 14)
+               if idx < cardLineArrays.count - 1 { row += "  " }
+            }
+            content.append(row)
+         }
+         content.append("")
+      }
+
+      // Supply (left) and Nobles (right), side by side within the panel
+      var supplyLines: [String] = ["\(bold)Supply\(reset)"]
+      for gem in GemType.allCases {
+         let n = game.supply[gem, default: 0]
+         supplyLines.append("  \(gemColor(gem))\(gem.stringValue): \(n)\(reset)")
+      }
+      supplyLines.append("  \(yellow)gold: \(game.goldGemSupply)\(reset)")
+
+      var nobleLines: [String] = ["\(bold)Nobles\(reset)"]
+      if game.nobles.isEmpty {
+         nobleLines.append("  (none)")
+      } else {
+         let nobleCardLines = game.nobles.map { formatNoble($0) }
+         let arrays = nobleCardLines.map { $0.split(separator: "\n").map(String.init) }
+         let maxLines = arrays.map { $0.count }.max() ?? 0
+         for i in 0..<maxLines {
+            var row = ""
+            for (idx, arr) in arrays.enumerated() {
+               row += i < arr.count ? arr[i] : String(repeating: " ", count: 12)
+               if idx < arrays.count - 1 { row += " " }
+            }
+            nobleLines.append(row)
+         }
+      }
+
+      // Side-by-side: supply gets ~18 chars, nobles get the rest
+      let supplyColWidth = 18
+      let height = max(supplyLines.count, nobleLines.count)
+      for i in 0..<height {
+         let l = i < supplyLines.count ? supplyLines[i] : ""
+         let r = i < nobleLines.count  ? nobleLines[i]  : ""
+         content.append(padRight(l, supplyColWidth) + r)
+      }
+
+      return boxed(title: "Game Board", content: content, width: BOARD_PANEL_WIDTH)
+   }
+
+   /// Moves panel for the CPU's turn: bars + percentages + descriptions, sorted.
+   private static func panelMovesCPU (game: Game, legalMoveIndices: [Int], probabilities: [Float], chosenIndex: Int) -> [String] {
+      let BAR_WIDTH = 20
+      let sorted = legalMoveIndices.sorted { probabilities[$0] > probabilities[$1] }
+      var content: [String] = []
+      for (menuNum, moveIdx) in sorted.enumerated() {
+         let prob = probabilities[moveIdx]
+         let barFilled = Int((prob * Float(BAR_WIDTH)).rounded())
+         let bar = String(repeating: "█", count: barFilled)
+                 + String(repeating: "░", count: BAR_WIDTH - barFilled)
+         let barColor: String
+         if prob > 0.50      { barColor = brightRed    }
+         else if prob > 0.20 { barColor = brightYellow }
+         else if prob > 0.05 { barColor = green        }
+         else                { barColor = grey         }
+         let isChosen = moveIdx == chosenIndex
+         let marker = isChosen ? "  \(bold)◀ CHOSEN\(reset)" : ""
+         let numStr = String(format: "%3d.", menuNum + 1)
+         let probStr = String(format: "%5.1f%%", prob * 100.0)
+         let desc = describeMoveVerbose(game.move(atIndex: moveIdx), game: game)
+         var line = "\(numStr) \(barColor)\(bar)\(reset) \(probStr)  \(desc)\(marker)"
+         if isChosen { line = "\(bold)\(line)\(reset)" }
+         content.append(line)
+      }
+      return boxed(title: "CPU move probabilities", content: content, width: MOVES_PANEL_WIDTH)
+   }
+
+   /// Moves panel for the human's turn: numbered list of legal moves (canonical order).
+   private static func panelMovesHuman (game: Game, legalMoveIndices: [Int]) -> [String] {
+      var content: [String] = []
+      for (menuNum, moveIdx) in legalMoveIndices.enumerated() {
+         let numStr = String(format: "%3d.", menuNum + 1)
+         let desc = describeMoveVerbose(game.move(atIndex: moveIdx), game: game)
+         content.append("\(numStr)  \(desc)")
+      }
+      return boxed(title: "Choose a move", content: content, width: MOVES_PANEL_WIDTH)
+   }
+
+   /// Top-level interactive view for a 2-player game.
+   /// Top region: combined player-stack (opponent on top, you on bottom) + game-board.
+   /// Bottom region: full-width moves panel (CPU sorted+probs, or human numbered).
+   public static func presentInteractive2P (
+      game: Game,
+      legalMoveIndices: [Int],
+      probabilities: [Float]? = nil,
+      chosenIndex: Int? = nil) {
+
+      precondition(game.players.count == 2, "presentInteractive2P only supports 2-player games")
+
+      let playersBox = panelPlayersStack(game: game)
+      let boardBox   = panelBoard(game)
+
+      let movesBox: [String]
+      if let probs = probabilities, let chosen = chosenIndex {
+         movesBox = panelMovesCPU(game: game, legalMoveIndices: legalMoveIndices,
+                                  probabilities: probs, chosenIndex: chosen)
+      } else {
+         movesBox = panelMovesHuman(game: game, legalMoveIndices: legalMoveIndices)
+      }
+
+      let topRow = joinHorizontal(playersBox, boardBox)
+
+      print("")
+      print("\(bold)═══ Turn \(game.currentTurn)  ·  Player \(game.currentPlayer)'s turn  ═══\(reset)")
+      for line in topRow  { print(line) }
+      for line in movesBox { print(line) }
    }
 }
 

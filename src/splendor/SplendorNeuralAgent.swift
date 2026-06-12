@@ -33,7 +33,7 @@ public struct ModelMetadata: Codable {
 ///   Input (361) -> Dense(512) -> Dense(512) -> Dense(256) -> Policy Head (48) + Value Head (1)
 public class PolicyValueNetwork: Module {
 
-   public static let INPUT_DIMENSIONS = 481 // Matches game's state embedding size
+   public static let INPUT_DIMENSIONS = 496 // Matches game's state embedding size
    public static let POLICY_DIMENSIONS = 48 // Matches game's move space (42 normal + 6 discard)
    public static let HIDDEN_DIMENSIONS = 512
    public static let DEFAULT_DROPOUT: Float = 0.1
@@ -49,7 +49,7 @@ public class PolicyValueNetwork: Module {
    public let precision: DType
 
    // Current architecture version - increment when architecture changes
-   public static let ARCHITECTURE_VERSION = 6
+   public static let ARCHITECTURE_VERSION = 7
 
    // Shared trunk layers
    let dense1: Linear

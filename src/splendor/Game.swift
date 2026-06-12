@@ -497,10 +497,11 @@ public struct Game: GameProtocol {
    // Size: 200 (4 players × 50) +
    //         5 (supply gem counts) +
    //         1 (gold supply gem count) +
+   //        15 (10 take-three yields + 5 take-two yields) +
    //       130 (5 nobles × 26: 1 point + 5 price + 4 players × 5 per-color deficits) +
    //       144 (3 tiers × 4 cards × 12) +
-   //         1 (turn) = 481
-   public static let GAME_STATE_ENCODING_SIZE = 481
+   //         1 (turn) = 496
+   public static let GAME_STATE_ENCODING_SIZE = 496
 
    public func encoding () -> [Float16] {
       var encoded: [Float16] = []
@@ -525,6 +526,29 @@ public struct Game: GameProtocol {
 
       // 1 gold gem supply count
       encoded.append(Float16(self.goldGemSupply) / 5.0)
+
+      // take-N gem yield flags: 15 values
+      // 10 take-three combinations (yield 0-3, normalized /3) +
+      //  5 take-two by color      (yield 0-2, normalized /2)
+      // Each value is "how many gems this move would actually deliver given current supply."
+      // Ordering matches generateAllCanonicalMoves (lex combinations for take-three,
+      // GemType.allCases order for take-two), so flag i maps 1:1 to canonical move 15+i
+      // for take-three, and 25+i for take-two.
+      let gemTypes = Array(GemType.allCases)
+      for i in 0..<gemTypes.count {
+         for j in (i+1)..<gemTypes.count {
+            for k in (j+1)..<gemTypes.count {
+               let yield = ((self.supply[gemTypes[i]] ?? 0) > 0 ? 1 : 0)
+                         + ((self.supply[gemTypes[j]] ?? 0) > 0 ? 1 : 0)
+                         + ((self.supply[gemTypes[k]] ?? 0) > 0 ? 1 : 0)
+               encoded.append(Float16(yield) / 3.0)
+            }
+         }
+      }
+      for gemType in gemTypes {
+         let yield = min(2, self.supply[gemType] ?? 0)
+         encoded.append(Float16(yield) / 2.0)
+      }
 
       // noble encodings: 130 values
       // 5 available nobles × 26 floats each (1 point + 5 price + 4 players × 5 per-color deficits)

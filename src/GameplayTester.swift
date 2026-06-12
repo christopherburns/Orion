@@ -227,10 +227,11 @@ public struct GameplayTester {
    }
 
 
-   /// Interactive game loop for human vs CPU play.
-   /// Prints board + player state before every turn. Human players get a numbered
-   /// move menu; CPU players see heat-colored probability bars with the chosen move
-   /// highlighted and a card panel when applicable.
+   /// Interactive game loop for human vs CPU play. **2-player only.**
+   /// Renders a quadrant layout each turn:
+   ///   ┌─ Opponent ─┐  ┌─ Game Board ─┐
+   ///   ┌─ You ──────┐  ┌─ Moves ──────┐
+   /// Human player gets a numbered move list; CPU shows heat-colored probability bars.
    static func playGameInteractive (
       playerCount: Int,
       seed: UInt64,
@@ -238,6 +239,7 @@ public struct GameplayTester {
       maxTurns: Int = 1000) -> (GameTerminalCondition, Int) {
 
       precondition(agents.count == playerCount, "Number of agents must match player count")
+      precondition(playerCount == 2, "Interactive mode supports 2-player games only")
 
       guard var g = Splendor.Game(playerCount: playerCount, seed: seed) else {
          print("Error: Failed to create game state")
@@ -252,12 +254,6 @@ public struct GameplayTester {
             break
          }
 
-         // Print current board and all player states
-         GamePrinter.present(g)
-         for (i, player) in g.players.enumerated() {
-            GamePrinter.presentPlayer(player, playerIndex: i)
-         }
-
          let currentAgent  = agents[g.currentPlayer]
          let validMoveMask = g.legalMoveMaskForCurrentPlayer()
          let legalIndices  = validMoveMask.indices.filter { validMoveMask[$0] }
@@ -266,10 +262,7 @@ public struct GameplayTester {
 
          if currentAgent.isHuman {
             // ── Human turn ────────────────────────────────────────────────
-            GamePrinter.presentHumanMoveMenu(
-               playerIndex: g.currentPlayer,
-               legalMoveIndices: legalIndices,
-               game: g)
+            GamePrinter.presentInteractive2P(game: g, legalMoveIndices: legalIndices)
 
             var chosen: Int? = nil
             while chosen == nil {
@@ -294,16 +287,15 @@ public struct GameplayTester {
             }
             moveIndex = greedyIndex
 
-            // Compute softmax probabilities over ALL moves for display (temperature = 1)
+            // Compute softmax probabilities over legal moves for display (temperature = 1)
             let probs = computeMoveProbabilities(logits: policyLogits, validMoveMask: validMoveMask)
                ?? Array(repeating: 0.0, count: policyLogits.count)
 
-            GamePrinter.presentCPUMoveMenu(
-               playerIndex: g.currentPlayer,
+            GamePrinter.presentInteractive2P(
+               game: g,
                legalMoveIndices: legalIndices,
                probabilities: probs,
-               chosenIndex: moveIndex,
-               game: g)
+               chosenIndex: moveIndex)
 
             print("\nPress enter to continue…", terminator: "")
             fflush(stdout)
@@ -313,7 +305,8 @@ public struct GameplayTester {
          g.applyMove(canonicalMoveIndex: moveIndex)
       }
 
-      // Print final board state
+      // Final board state — use the legacy sequential render since the game is over
+      // and there are no moves to show.
       print("\n" + String(repeating: "═", count: 80))
       GamePrinter.present(g)
       for (i, player) in g.players.enumerated() {
