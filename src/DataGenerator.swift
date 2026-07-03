@@ -194,6 +194,7 @@ public struct DataGenerator {
       opts.addOption("Data Generator", "t", "temperature", "Sampling temperature for move selection (default: 1.0, higher = more exploration)")
       opts.addOption("Data Generator", "", "max-turns", "Maximum turns per game before timeout (default: 1000)")
       opts.addOption("Data Generator", "", "monte-carlo-samples", "MCTS simulations per move (default: 1, minimum: 1)")
+      opts.addOption("Data Generator", "", "mcts-leaf-batch", "Leaves selected per MCTS round per game via virtual loss (default: 8, 1 = classic one-at-a-time)")
       opts.addOption("Data Generator", "", "c-puct", "MCTS exploration constant (default: 1.5)")
       opts.addOption("Data Generator", "b", "batch-size", "Number of games per batch / parallel lanes (default: 128)")
       opts.addOption("Data Generator", "", "mcts-debug", "Print MCTS search tree and π after every move (very verbose, for debugging)", requireArgument: false)
@@ -224,6 +225,7 @@ public struct DataGenerator {
          let maxTurns: Int
          let seed: UInt64
          let monteCarloSamples: Int
+         let mctsLeafBatch: Int
          let cPuct: Float
          let batchSize: Int
          let output: String
@@ -274,6 +276,7 @@ public struct DataGenerator {
       maxTurns: Int,
       baseSeed: UInt64,
       laneCount: Int,
+      mctsLeafBatch: Int,
       baseGameIndex: Int = 0) -> (games: [GameData], statistics: MoveStatistics) {
 
       let actualLanes = min(laneCount, gameCount)
@@ -323,16 +326,20 @@ public struct DataGenerator {
       mctsSearch.agent.prepareForInference()
 
       while lanes.contains(where: { $0.active }) {
-         // --- Simulation phase: monteCarloSamples rounds of batched selection + eval ---
-         for _ in 0..<mctsSearch.monteCarloSamples {
+         // --- Simulation phase: batched selection + eval rounds ---
+         // Each round selects up to mctsLeafBatch leaves per lane under virtual
+         // loss, so one network dispatch serves up to laneCount × mctsLeafBatch
+         // evaluations. Total selections per move stays ≈ monteCarloSamples.
+         let leafBatch = max(1, mctsLeafBatch)
+         let roundCount = (mctsSearch.monteCarloSamples + leafBatch - 1) / leafBatch
+         for _ in 0..<roundCount {
             var pending: [(laneIdx: Int, result: SelectionResult)] = []
 
             for i in lanes.indices {
                guard lanes[i].active else { continue }
-               let result = mctsSearch.selectLeaf(root: lanes[i].mctsRoot, game: lanes[i].game)
-               if let terminalValue = result.terminalValue {
-                  mctsSearch.backpropagate(result: result, leafValue: terminalValue)
-               } else {
+               let results = mctsSearch.selectLeavesWithVirtualLoss(
+                  root: lanes[i].mctsRoot, game: lanes[i].game, count: leafBatch)
+               for result in results {
                   pending.append((i, result))
                }
             }
@@ -341,9 +348,7 @@ public struct DataGenerator {
                let leafGames = pending.map { $0.result.leafGame }
                let (allLogits, allValues) = mctsSearch.batchEvaluate(leafGames: leafGames)
                for (j, (_, result)) in pending.enumerated() {
-                  let mask = result.leafGame.legalMoveMaskForCurrentPlayer()
-                  mctsSearch.expandLeaf(node: result.leafNode, logits: allLogits[j], legalMask: mask)
-                  mctsSearch.backpropagate(result: result, leafValue: allValues[j])
+                  mctsSearch.completeEvaluation(result: result, logits: allLogits[j], value: allValues[j])
                }
             }
          }
@@ -426,6 +431,7 @@ public struct DataGenerator {
       maxTurns: Int,
       outputPath: String,
       monteCarloSamples: Int = 1,
+      mctsLeafBatch: Int = 8,
       cPuct: Float = 1.5,
       mctsDebug: Bool = false,
       batchSize: Int = 128,
@@ -443,7 +449,7 @@ public struct DataGenerator {
       print("  Temperature:      \(String(format: "%.2f", temperature))")
       print("  Max turns:        \(maxTurns)")
       print("  Seed:             \(seed)")
-      print("  MCTS sims/move:   \(monteCarloSamples)  (c_puct=\(cPuct))")
+      print("  MCTS sims/move:   \(monteCarloSamples)  (c_puct=\(cPuct), leaf batch=\(mctsLeafBatch))")
       print("  Batch size:       \(batchSize)")
       print("  Tasks:            \(taskCount)\(serial ? " (serial)" : " (concurrent)")")
       print("  Output:           \(outputPath)")
@@ -480,6 +486,7 @@ public struct DataGenerator {
                maxTurns: maxTurns,
                baseSeed: taskBaseSeed,
                laneCount: taskGameCount,
+               mctsLeafBatch: mctsLeafBatch,
                baseGameIndex: taskOffset)
 
             taskResults[taskIndex] = result
@@ -567,6 +574,7 @@ public struct DataGenerator {
 
       let agentSpec = opts.get(option: "agent", orElse: "random")
       let monteCarloSamples = opts.get(option: "monte-carlo-samples", orElse: 1)
+      let mctsLeafBatch = opts.get(option: "mcts-leaf-batch", orElse: 8)
       let cPuct = opts.get(option: "c-puct", orElse: Float(1.5))
       let mctsDebug = opts.wasProvided(option: "mcts-debug")
       let batchSize = opts.get(option: "batch-size", orElse: 128)
@@ -585,6 +593,7 @@ public struct DataGenerator {
          maxTurns: maxTurns,
          outputPath: outputPath,
          monteCarloSamples: monteCarloSamples,
+         mctsLeafBatch: mctsLeafBatch,
          cPuct: cPuct,
          mctsDebug: mctsDebug,
          batchSize: batchSize,
@@ -610,6 +619,7 @@ public struct DataGenerator {
                maxTurns:          maxTurns,
                seed:              baseSeed,
                monteCarloSamples: monteCarloSamples,
+               mctsLeafBatch:     mctsLeafBatch,
                cPuct:             cPuct,
                batchSize:         batchSize,
                output:            outputPath),

@@ -31,6 +31,10 @@ public final class MCTSNode {
    var priors: [Float] = []
    var children: [MCTSNode?] = []
 
+   /// True while this leaf has been selected for network evaluation but the
+   /// result hasn't arrived yet (multi-leaf batching with virtual loss).
+   var pendingEvaluation: Bool = false
+
    public init () {}
 
    var isExpanded: Bool { !priors.isEmpty }
@@ -153,17 +157,64 @@ public struct MCTSSearch {
       node.children = [MCTSNode?](repeating: nil, count: Game.CANONICAL_MOVE_COUNT)
    }
 
-   /// Walk the selection path in reverse, updating visit counts and backed-up values.
-   public func backpropagate (result: SelectionResult, leafValue: Float) {
-      result.leafNode.visitCount += 1
-      result.leafNode.totalValue += leafValue
+   /// Value backed up along the path while a leaf's evaluation is in flight.
+   /// Pessimistic ("this playout lost") so repeated selections in the same
+   /// round diverge to different leaves.
+   private static let VIRTUAL_LOSS: Float = -1.0
+
+   /// Walk the selection path applying visit/value deltas.
+   /// sign = +1 records a simulation, sign = -1 retracts one (virtual loss revert).
+   private func propagate (result: SelectionResult, leafValue: Float, sign: Int) {
+      result.leafNode.visitCount += sign
+      result.leafNode.totalValue += Float(sign) * leafValue
 
       var value = leafValue
       for step in result.path.reversed() {
          if step.didChangePlayer { value = -value }
-         step.node.visitCount += 1
-         step.node.totalValue += value
+         step.node.visitCount += sign
+         step.node.totalValue += Float(sign) * value
       }
+   }
+
+   /// Walk the selection path in reverse, updating visit counts and backed-up values.
+   public func backpropagate (result: SelectionResult, leafValue: Float) {
+      propagate(result: result, leafValue: leafValue, sign: 1)
+   }
+
+   /// Select up to `count` distinct leaves from one tree for batched evaluation.
+   /// Each selected leaf gets virtual loss applied along its path so successive
+   /// selections diverge. Terminal leaves are backpropagated immediately and
+   /// consume one selection without producing a pending result. Selection stops
+   /// early when every remaining path funnels into a leaf already in flight.
+   /// Every returned result must be finished with `completeEvaluation`.
+   public func selectLeavesWithVirtualLoss (root: MCTSNode, game: Game, count: Int) -> [SelectionResult] {
+      var results: [SelectionResult] = []
+      results.reserveCapacity(count)
+
+      for _ in 0..<count {
+         let result = selectLeaf(root: root, game: game)
+         if let terminalValue = result.terminalValue {
+            backpropagate(result: result, leafValue: terminalValue)
+            continue
+         }
+         // Virtual loss couldn't divert selection away from an in-flight leaf
+         // (tiny tree) — no more distinct leaves available this round.
+         if result.leafNode.pendingEvaluation { break }
+
+         result.leafNode.pendingEvaluation = true
+         propagate(result: result, leafValue: MCTSSearch.VIRTUAL_LOSS, sign: 1)
+         results.append(result)
+      }
+      return results
+   }
+
+   /// Finish an in-flight selection: revert its virtual loss, expand the leaf
+   /// with the network's priors, and backpropagate the real value.
+   public func completeEvaluation (result: SelectionResult, logits: [Float], value: Float) {
+      propagate(result: result, leafValue: MCTSSearch.VIRTUAL_LOSS, sign: -1)
+      result.leafNode.pendingEvaluation = false
+      expandLeaf(node: result.leafNode, logits: logits, legalMask: result.leafGame.legalMoveMaskForCurrentPlayer())
+      backpropagate(result: result, leafValue: value)
    }
 
    /// Evaluate multiple leaf game states via batched agent prediction.
