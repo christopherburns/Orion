@@ -35,6 +35,13 @@ public final class MCTSNode {
 
    var isExpanded: Bool { !priors.isEmpty }
 
+   /// The child node reached by `action`, or nil if this node is unexpanded
+   /// or the action was never visited. Used for subtree reuse between moves.
+   public func child (action: Int) -> MCTSNode? {
+      guard !children.isEmpty else { return nil }
+      return children[action]
+   }
+
    /// Q value for `action` from THIS node's player's perspective.
    /// Child stores from the child's perspective, so we negate.
    func q (action: Int) -> Float {

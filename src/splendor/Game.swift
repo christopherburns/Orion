@@ -32,10 +32,29 @@ public struct PlayerState {
    public var gems: [Int] = [0, 0, 0, 0, 0] // Indexed by GemType.rawValue
    public var goldGems: Int = 0
    public var reservedCards: [Card] = [] // Indexed by tier
-   public var cards: [Card] = []
-   public var nobles: [Noble] = []
+
+   // cards/nobles are mutated only through addCard/addNobles so the cached
+   // cardPower and score stay in sync — these are read on every legal-move
+   // check and terminal test, so they must not require scanning the arrays.
+   public private(set) var cards: [Card] = []
+   public private(set) var nobles: [Noble] = []
+   public private(set) var cardPower: [Int] = [0, 0, 0, 0, 0] // Indexed by GemType.rawValue
+   public private(set) var score: Int = 0
 
    public init () {}
+
+   public mutating func addCard (_ card: Card) {
+      cards.append(card)
+      cardPower[card.color.rawValue] += 1
+      score += card.points
+   }
+
+   public mutating func addNobles (_ newNobles: [Noble]) {
+      nobles.append(contentsOf: newNobles)
+      for noble in newNobles {
+         score += noble.points
+      }
+   }
 
    public func validate () -> Bool {
       precondition(self.gems.count == GemType.allCases.count, "Player gems must be indexed by GemType")
@@ -45,31 +64,27 @@ public struct PlayerState {
       return true
    }
 
-   public var score: Int {
-      return self.cards.reduce(0, { $0 + $1.points }) + self.nobles.reduce(0, { $0 + $1.points })
-   }
-
    public var gemCount: Int {
       return self.gems.reduce(0, +) + self.goldGems
    }
 
    public func purchasePower () -> [Int] {
       var purchasePower = self.gems
-      for ownedCard in self.cards {
-         purchasePower[ownedCard.color.rawValue] += 1
+      for i in 0..<purchasePower.count {
+         purchasePower[i] += self.cardPower[i]
       }
       return purchasePower
    }
 
    public func canAfford (cost: [Int]) -> Bool {
       // Check if player can afford the given cost using gems, permanent gems from cards, and gold gems as wildcards
-      precondition(cost.count == GemType.allCases.count, "Cost array must match GemType count")
+      assert(cost.count == GemType.allCases.count, "Cost array must match GemType count")
 
       var totalShortfall = 0
-      let purchasePower = self.purchasePower()
-      for (gemIndex, price) in cost.enumerated() {
-         if purchasePower[gemIndex] < price {
-            totalShortfall += price - purchasePower[gemIndex]
+      for gemIndex in 0..<cost.count {
+         let shortfall = cost[gemIndex] - self.gems[gemIndex] - self.cardPower[gemIndex]
+         if shortfall > 0 {
+            totalShortfall += shortfall
          }
       }
       // Gold gems can be used as wildcards to cover any shortfall
@@ -77,13 +92,8 @@ public struct PlayerState {
    }
 
    public func cardBasedPurchasePower () -> [Int] {
-      // Returns card-based purchasing power (cards only, no gems)
-      // Counts how many cards the player owns of each color
-      var power = Array(repeating: 0, count: GemType.allCases.count)
-      for card in self.cards {
-         power[card.color.rawValue] += 1
-      }
-      return power
+      // Card-based purchasing power (cards only, no gems), maintained incrementally
+      return self.cardPower
    }
 
    // Encode player state as a fixed-size array of Float16
@@ -99,11 +109,7 @@ public struct PlayerState {
       encoded.append(Float16(self.goldGems) / 10.0)
 
       // Record the number of cards owned of each color - this is 5 more values
-      var power: [Float16] = Array(repeating: Float16(0), count: GemType.allCases.count)
-      for card in self.cards {
-         power[card.color.rawValue] += 1.0
-      }
-      encoded.append(contentsOf: power.map { Float16($0) / 7.0 })
+      encoded.append(contentsOf: self.cardPower.map { Float16($0) / 7.0 })
 
       // reserved card count + 3 reserved cards × 11 floats each (1 point + 5 price + 5 color one-hot)
       encoded.append(Float16(self.reservedCards.count) / 3.0)
@@ -166,8 +172,11 @@ public struct Game: GameProtocol {
    public var currentTurn: Int = 0
    public var phase: GamePhase = .normalAction
 
-   // Memoized canonical moves and legal move mask for the current player
-   private var _allMoves: [Move] = []
+   // Canonical moves are identical for every game — shared statically so Game
+   // values stay cheap to copy (MCTS copies the game on every simulation).
+   private static let _allMoves: [Move] = generateAllCanonicalMoves()
+
+   // Memoized legal move mask for the current player
    private var _currentPlayerLegalMoveMask: [Bool] = []
 
    public init? (playerCount: Int, seed: UInt64 = 0) {
@@ -196,9 +205,8 @@ public struct Game: GameProtocol {
 
       guard self.validate() else { return nil }
 
-      // Initialize memoized values
-      self._allMoves = self.generateAllCanonicalMoves()
-      self._currentPlayerLegalMoveMask = self._allMoves.map { move in
+      // Initialize memoized legal move mask
+      self._currentPlayerLegalMoveMask = Game._allMoves.map { move in
          self.isMoveLegal(move, forPlayer: self.currentPlayer)
       }
    }
@@ -213,7 +221,7 @@ public struct Game: GameProtocol {
    }
 
    // Generate all possible moves in canonical order
-   private func generateAllCanonicalMoves () -> [Move] {
+   private static func generateAllCanonicalMoves () -> [Move] {
       var moves: [Move] = []
 
       // Purchase moves: 12 possible (3 tiers × 4 positions)
@@ -313,7 +321,7 @@ public struct Game: GameProtocol {
 
    public func move (atIndex index: Int) -> Move {
       precondition(index >= 0 && index < canonicalMoveCount, "Move index out of bounds")
-      return _allMoves[index]
+      return Game._allMoves[index]
    }
 
    public func legalMoveMaskForCurrentPlayer () -> [Bool] {
@@ -336,8 +344,7 @@ public struct Game: GameProtocol {
       var goldUsed = 0
       for (gemIndex, price) in card.price.enumerated() {
          if price > 0 {
-            let gemType = GemType(rawValue: gemIndex)!
-            let permanentGems = players[playerIndex].cards.filter { $0.color == gemType }.count
+            let permanentGems = players[playerIndex].cardPower[gemIndex]
             let needed = max(0, price - permanentGems)
             let regularPaid = min(needed, players[playerIndex].gems[gemIndex])
             let goldNeeded = needed - regularPaid
@@ -354,7 +361,7 @@ public struct Game: GameProtocol {
 
    private mutating func awardAvailableNobles (toPlayer playerIndex: Int) {
       // Check if player can afford any noble using only card-based purchasing power
-      let cardPower = players[playerIndex].cardBasedPurchasePower()
+      let cardPower = players[playerIndex].cardPower
 
       // Helper to check if a noble is affordable
       let isAffordable = { (noble: Noble) -> Bool in
@@ -365,7 +372,7 @@ public struct Game: GameProtocol {
 
       // Filter nobles to find those the player can afford, transfer to the player
       let affordableNobles = nobles.filter(isAffordable)
-      players[playerIndex].nobles.append(contentsOf: affordableNobles)
+      players[playerIndex].addNobles(affordableNobles)
       nobles = nobles.filter { !isAffordable($0) }
    }
 
@@ -388,7 +395,7 @@ public struct Game: GameProtocol {
          preconditionFailure("Invalid player index")
       }
 
-      let move = _allMoves[canonicalMoveIndex]
+      let move = Game._allMoves[canonicalMoveIndex]
 
       switch move {
       case .purchaseCard(let tier, let position):
@@ -399,7 +406,7 @@ public struct Game: GameProtocol {
 
          // Remove card from deck and add to player
          cardDecks[tier].remove(at: position)
-         players[playerIndex].cards.append(card)
+         players[playerIndex].addCard(card)
 
          // Check and award any available nobles
          awardAvailableNobles(toPlayer: playerIndex)
@@ -412,7 +419,7 @@ public struct Game: GameProtocol {
          payForCard(card: card, playerIndex: playerIndex)
 
          // Move card from reserved cards to owned cards
-         players[playerIndex].cards.append(card)
+         players[playerIndex].addCard(card)
          players[playerIndex].reservedCards.remove(at: position)
 
          // Check and award any available nobles
@@ -486,7 +493,7 @@ public struct Game: GameProtocol {
       }
 
       // Recompute legal move mask for the current player
-      _currentPlayerLegalMoveMask = _allMoves.map { isMoveLegal($0, forPlayer: currentPlayer) }
+      _currentPlayerLegalMoveMask = Game._allMoves.map { isMoveLegal($0, forPlayer: currentPlayer) }
    }
 
    // Encode game state as a fixed-size array of Float16

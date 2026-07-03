@@ -377,7 +377,12 @@ public struct DataGenerator {
             lanes[i].moves.append((playerIndex: currentPlayer, moveIndex: moveIndex))
 
             lanes[i].game.applyMove(canonicalMoveIndex: moveIndex)
-            lanes[i].mctsRoot = MCTSNode()
+
+            // Reuse the chosen child's subtree as the new search root — its visits and
+            // priors carry over, so the next move's simulations start warm instead of
+            // rebuilding the tree from nothing. Falls back to a fresh node when the
+            // child was never expanded (e.g. move sampled from the prior fallback).
+            lanes[i].mctsRoot = lanes[i].mctsRoot.child(action: moveIndex) ?? MCTSNode()
             lanes[i].turnCount += 1
 
             // Check if game is complete
