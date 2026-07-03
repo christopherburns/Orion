@@ -36,6 +36,7 @@ Options:
    --eval-temp TEMP            Sampling temperature during evaluation (0=greedy) [default: 0.1]
    --dropout N                 Dropout rate for trunk layers (0=disabled)        [default: 0.1]
    --monte-carlo-samples N     MCTS monteCarloSamples per move (0=disabled)      [default: 25]
+   --mcts-leaf-batch N         Leaves selected per MCTS round via virtual loss   [default: 8]
    --c-puct N                  MCTS exploration constant                         [default: 1.5]
    --accumulate-data           Train on all previous generations' data, not just the latest
    --binary PATH               Path to the orion binary                          [default: .build/release/orion]
@@ -85,6 +86,7 @@ class Config:
    evalTemp:            float
    dropout:             float
    monteCarloSamples:   int
+   mctsLeafBatch:       int
    cPuct:               float
    accumulateData:      bool
    binary:              str
@@ -146,7 +148,9 @@ def generateData (cfg: Config, outputPath: str, agent: str, temperature: float, 
       "-t", f"{temperature:.2f}",
    ]
    if cfg.monteCarloSamples > 0:
-      args += ["--monte-carlo-samples", str(cfg.monteCarloSamples), "--c-puct", str(cfg.cPuct),
+      args += ["--monte-carlo-samples", str(cfg.monteCarloSamples),
+               "--mcts-leaf-batch", str(cfg.mctsLeafBatch),
+               "--c-puct", str(cfg.cPuct),
                "-b", str(cfg.generateBatchSize)]
    return runOrion(args, "generate", reportPath)
 
@@ -352,6 +356,7 @@ def configFromArgs (args: dict) -> Config:
       evalTemp            = float(args["--eval-temp"]),
       dropout             = float(args["--dropout"]),
       monteCarloSamples   = int(args["--monte-carlo-samples"]),
+      mctsLeafBatch       = int(args["--mcts-leaf-batch"]),
       cPuct               = float(args["--c-puct"]),
       accumulateData      = bool(args["--accumulate-data"]),
       binary              = args["--binary"],
