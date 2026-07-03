@@ -183,7 +183,7 @@ public class GamePrinter {
       // Print supply
       print("\n\(bold)Supply:\(reset)")
       for gem in GemType.allCases {
-         let count = game.supply[gem, default: 0]
+         let count = game.supply[gem.rawValue]
          let colorCode = gemColor(gem)
          print("  \(colorCode)\(gem.stringValue): \(count)\(reset)")
       }
@@ -492,7 +492,7 @@ public class GamePrinter {
          return "Purchase reserved \(cc)\(card.color.stringValue)\(reset) card [\(pts), costs \(costString(card.price))]"
 
       case .takeThreeGems(let gems):
-         let available = gems.filter { game.supply[$0, default: 0] > 0 }
+         let available = gems.filter { game.supply[$0.rawValue] > 0 }
          let gemDesc = gems.map { "\(gemColor($0))■\(reset) \($0.stringValue)" }.joined(separator: ", ")
          if available.count < gems.count {
             return "Take 3 gems: \(gemDesc) \(dim)(some depleted)\(reset)"
@@ -500,7 +500,7 @@ public class GamePrinter {
          return "Take 3 gems: \(gemDesc)"
 
       case .takeTwoGems(let gem):
-         let supply = game.supply[gem, default: 0]
+         let supply = game.supply[gem.rawValue]
          return "Take 2 \(gemColor(gem))■\(reset) \(gem.stringValue) gems (supply: \(supply))"
 
       case .reserveCard(let tier, let position):
@@ -820,7 +820,7 @@ public class GamePrinter {
       // Supply (left) and Nobles (right), side by side within the panel
       var supplyLines: [String] = ["\(bold)Supply\(reset)"]
       for gem in GemType.allCases {
-         let n = game.supply[gem, default: 0]
+         let n = game.supply[gem.rawValue]
          supplyLines.append("  \(gemColor(gem))\(gem.stringValue): \(n)\(reset)")
       }
       supplyLines.append("  \(yellow)gold: \(game.goldGemSupply)\(reset)")

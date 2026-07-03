@@ -159,7 +159,7 @@ public struct Game: GameProtocol {
    // Three card decks, one for each tier, top four are face up and available to be bought
    public var cardDecks: [[Card]] = [[], [], []]
    public var players: [PlayerState]
-   public var supply: [GemType: Int] = [:]
+   public var supply: [Int] = [0, 0, 0, 0, 0] // Indexed by GemType.rawValue
    public var goldGemSupply: Int = 5  // Gold gems available in supply (standard Splendor has 5)
    public var nobles: [Noble] = []
    public var currentPlayer: Int = 0
@@ -187,9 +187,7 @@ public struct Game: GameProtocol {
       }
 
       let gemsInSupply = playerCount == 2 ? 4 : 6
-      self.supply = Dictionary(uniqueKeysWithValues: GemType.allCases.map {
-         ($0, gemsInSupply)
-      })
+      self.supply = Array(repeating: gemsInSupply, count: GemType.allCases.count)
 
       // Initialize nobles: select playerCount + 1 nobles randomly
       var allNobles = Noble.allNobles()
@@ -280,17 +278,14 @@ public struct Game: GameProtocol {
       case .takeThreeGems(let gems):
          // Only legal during normal action phase
          guard phase == .normalAction else { return false }
-         // Must be exactly 3 different gems
-         guard gems.count == 3 && Set(gems).count == 3 else { return false }
          // Always legal - player can take 0 gems if all colors depleted (effectively a pass)
          return true
-
 
       case .takeTwoGems(let gem):
          // Only legal during normal action phase
          guard phase == .normalAction else { return false }
          // Check supply has at least 4 of this gem type
-         guard supply[gem, default: 0] >= 4 else { return false }
+         guard supply[gem.rawValue] >= 4 else { return false }
          // No gem limit check - player can exceed 10 and will discard later
          return true
 
@@ -348,7 +343,7 @@ public struct Game: GameProtocol {
             let goldNeeded = needed - regularPaid
 
             players[playerIndex].gems[gemIndex] -= regularPaid
-            supply[gemType, default: 0] += regularPaid
+            supply[gemIndex] += regularPaid
             goldUsed += goldNeeded
          }
       }
@@ -382,7 +377,8 @@ public struct Game: GameProtocol {
       // This function should never be called with an invalidate game state or invalid move,
       // we can check all these conditions with asserts that crash the program if they are violated
 
-      precondition(self.validate(), "Game state is invalid")
+      assert(self.validate(), "Game state is invalid")
+
       precondition(canonicalMoveIndex < self.canonicalMoveCount, "Canonical move index is out of bounds")
       precondition(canonicalMoveIndex >= 0, "Canonical move index is negative")
       precondition(_currentPlayerLegalMoveMask[canonicalMoveIndex], "Move is not legal")
@@ -425,17 +421,17 @@ public struct Game: GameProtocol {
       case .takeThreeGems(let gems):
          // Take gems from supply (only from colors that have supply available)
          for gem in gems {
-            if supply[gem, default: 0] >= 1 {
-               supply[gem]! -= 1
+            if supply[gem.rawValue] >= 1 {
+               supply[gem.rawValue] -= 1
                players[playerIndex].gems[gem.rawValue] += 1
             }
          }
 
       case .takeTwoGems(let gem):
-         precondition(supply[gem, default: 0] >= 4, "Insufficient gems in supply")
+         precondition(supply[gem.rawValue] >= 4, "Insufficient gems in supply")
 
          // Take 2 gems from supply (no limit check - may exceed 10)
-         supply[gem]! -= 2
+         supply[gem.rawValue] -= 2
          players[playerIndex].gems[gem.rawValue] += 2
 
       case .reserveCard(let tier, let position):
@@ -455,7 +451,7 @@ public struct Game: GameProtocol {
          // Discard a gem and return it to supply
          precondition(players[playerIndex].gems[gemType.rawValue] > 0, "Player has no \(gemType) gems to discard")
          players[playerIndex].gems[gemType.rawValue] -= 1
-         supply[gemType, default: 0] += 1
+         supply[gemType.rawValue] += 1
 
       case .discardGoldGem:
          // Discard a gold gem and return it to supply
@@ -521,7 +517,7 @@ public struct Game: GameProtocol {
 
       // 5 supply gem counts (one per GemType)
       for gemType in GemType.allCases {
-         encoded.append(Float16(self.supply[gemType] ?? 0) / 6.0)
+         encoded.append(Float16(self.supply[gemType.rawValue]) / 6.0)
       }
 
       // 1 gold gem supply count
@@ -538,15 +534,15 @@ public struct Game: GameProtocol {
       for i in 0..<gemTypes.count {
          for j in (i+1)..<gemTypes.count {
             for k in (j+1)..<gemTypes.count {
-               let yield = ((self.supply[gemTypes[i]] ?? 0) > 0 ? 1 : 0)
-                         + ((self.supply[gemTypes[j]] ?? 0) > 0 ? 1 : 0)
-                         + ((self.supply[gemTypes[k]] ?? 0) > 0 ? 1 : 0)
+               let yield = (self.supply[gemTypes[i].rawValue] > 0 ? 1 : 0)
+                         + (self.supply[gemTypes[j].rawValue] > 0 ? 1 : 0)
+                         + (self.supply[gemTypes[k].rawValue] > 0 ? 1 : 0)
                encoded.append(Float16(yield) / 3.0)
             }
          }
       }
       for gemType in gemTypes {
-         let yield = min(2, self.supply[gemType] ?? 0)
+         let yield = min(2, self.supply[gemType.rawValue])
          encoded.append(Float16(yield) / 2.0)
       }
 
