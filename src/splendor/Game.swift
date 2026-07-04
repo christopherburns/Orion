@@ -496,6 +496,36 @@ public struct Game: GameProtocol {
       _currentPlayerLegalMoveMask = Game._allMoves.map { isMoveLegal($0, forPlayer: currentPlayer) }
    }
 
+   /// Return a copy of this game with the hidden portion of each tier's deck
+   /// reshuffled — a "determinization" for search under hidden information.
+   ///
+   /// Cards only ever leave `cardDecks[tier]` from the visible window (positions
+   /// 0..<4, via `.remove(at:)` in `applyMove`, which shifts later cards up). So
+   /// at any point in the game, `cardDecks[tier][visibleCount...]` already holds
+   /// exactly the correct multiset of undrawn cards for that tier — it's just in
+   /// the one true (but player-invisible) order fixed by the game's seed. Search
+   /// must not be allowed to see or exploit that true order — a real opponent
+   /// can't — so this replaces it with a freshly sampled random order, drawn from
+   /// an RNG independent of the game's own seed. The visible cards (what's
+   /// actually observed on the board right now) are left untouched.
+   ///
+   /// Only the future is being re-randomized here, not the present: this does not
+   /// change anything a player could currently see or any move's legality.
+   public func determinized (seed: UInt64) -> Game {
+      var result = self
+      var rng = SeededRandomNumberGenerator(seed: seed)
+
+      for tier in 0..<result.cardDecks.count {
+         let visibleCount = min(4, result.cardDecks[tier].count)
+         guard visibleCount < result.cardDecks[tier].count else { continue } // nothing hidden left
+         var hiddenTail = Array(result.cardDecks[tier][visibleCount...])
+         hiddenTail.shuffle(using: &rng)
+         result.cardDecks[tier].replaceSubrange(visibleCount..., with: hiddenTail)
+      }
+
+      return result
+   }
+
    // Encode game state as a fixed-size array of Float16
    // Size: 200 (4 players × 50) +
    //         5 (supply gem counts) +

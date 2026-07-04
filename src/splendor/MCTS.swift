@@ -242,22 +242,54 @@ public struct MCTSSearch {
    /// Falls back to prior distribution when no children have been visited
    /// (e.g. monteCarloSamples=1, where only the root is expanded).
    public func visitCountPolicy (root: MCTSNode, temperature: Float) -> [Float] {
+      Self.policy(fromCounts: Self.visitCounts(root: root), fallbackPriors: root.isExpanded ? root.priors : nil, temperature: temperature)
+   }
+
+   /// Aggregate visit counts across several roots — one per determinization of
+   /// the same decision point — into a single move-selection policy. Used so a
+   /// real move never depends on any one player-invisible resolution of hidden
+   /// deck order; see `Game.determinized(seed:)`.
+   public static func aggregatedPolicy (roots: [MCTSNode], temperature: Float) -> [Float] {
+      precondition(!roots.isEmpty, "aggregatedPolicy requires at least one root")
+
+      var counts = [Float](repeating: 0.0, count: Game.CANONICAL_MOVE_COUNT)
+      for root in roots {
+         let rootCounts = visitCounts(root: root)
+         for i in 0..<counts.count { counts[i] += rootCounts[i] }
+      }
+
+      // All determinizations share the same visible board and differ only in the
+      // hidden deck tail, which the root's own network evaluation never sees —
+      // so every root's priors are identical, and any one is a valid fallback.
+      let fallback = roots[0].isExpanded ? roots[0].priors : nil
+      return policy(fromCounts: counts, fallbackPriors: fallback, temperature: temperature)
+   }
+
+   /// Extract per-action visit counts from a root's immediate children.
+   static func visitCounts (root: MCTSNode) -> [Float] {
       var counts = [Float](repeating: 0.0, count: Game.CANONICAL_MOVE_COUNT)
       for (action, child) in root.children.enumerated() {
          if let child = child {
             counts[action] = Float(child.visitCount)
          }
       }
+      return counts
+   }
 
+   /// Shared counts → probability-distribution transform, used both for a single
+   /// tree's visit counts and for counts aggregated across several determinized
+   /// trees (see `GameplayTester`'s determinized search). `fallbackPriors`, when
+   /// given, is returned as-is if no visits were recorded at all.
+   static func policy (fromCounts counts: [Float], fallbackPriors: [Float]?, temperature: Float) -> [Float] {
       let totalVisits = counts.reduce(0, +)
 
       // No children visited — fall back to prior distribution
       if totalVisits == 0 {
-         return root.isExpanded ? root.priors : counts
+         return fallbackPriors ?? counts
       }
 
       if temperature < 1e-6 {
-         var policy = [Float](repeating: 0.0, count: Game.CANONICAL_MOVE_COUNT)
+         var policy = [Float](repeating: 0.0, count: counts.count)
          if let best = counts.indices.max(by: { counts[$0] < counts[$1] }) {
             policy[best] = 1.0
          }

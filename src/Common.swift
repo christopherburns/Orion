@@ -132,3 +132,15 @@ func sampleMoveWithTemperature (
    let maxIndex = probabilities.enumerated().max(by: { $0.1 < $1.1 })!.0
    return (maxIndex, probabilities)
 }
+
+/// Sample a move index from an already-normalized probability distribution
+/// (e.g. an MCTS visit-count policy) using CDF sampling.
+func sampleMoveFromPolicy (_ policy: [Float], rng: inout SeededRandomNumberGenerator) -> Int {
+   let threshold = Float.random(in: 0.0..<1.0, using: &rng)
+   var cumulative: Float = 0.0
+   for i in 0..<policy.count {
+      cumulative += policy[i]
+      if cumulative > threshold { return i }
+   }
+   return policy.indices.max(by: { policy[$0] < policy[$1] }) ?? 0
+}

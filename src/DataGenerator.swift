@@ -170,9 +170,10 @@ private struct GameLane {
    var rng: SeededRandomNumberGenerator
    var examples: [TrainingExample]
    var moves: [(playerIndex: Int, moveIndex: Int)]
-   var turnCount: Int
    var gameIndex: Int
    var active: Bool
+   // Turn count is not tracked here — game.currentTurn is authoritative and
+   // counts player turns correctly (a discard sub-move does not advance it).
 }
 
 public struct DataGenerator {
@@ -235,7 +236,11 @@ public struct DataGenerator {
          let successfulGames: Int
          let timedOutGames: Int
          let totalExamples: Int
+         // Examples (decisions) include discard sub-moves; turns count only
+         // completed player turns. They differ whenever a player over-takes
+         // gems and must discard, so both are reported distinctly.
          let avgExamplesPerGame: Double
+         let avgTurnsPerGame: Double
          let outputFile: String
          let outputBytesUncompressed: Int
          let outputBytesCompressed: Int
@@ -254,17 +259,6 @@ public struct DataGenerator {
       let byMoveType: [String: MoveCountsReport]
    }
 
-
-   /// Sample a move index from a policy distribution using CDF sampling.
-   private static func sampleMove (from policy: [Float], rng: inout SeededRandomNumberGenerator) -> Int {
-      let threshold = Float.random(in: 0.0..<1.0, using: &rng)
-      var cumulative: Float = 0.0
-      for i in 0..<policy.count {
-         cumulative += policy[i]
-         if cumulative > threshold { return i }
-      }
-      return policy.indices.max(by: { policy[$0] < policy[$1] }) ?? 0
-   }
 
    /// Run batched MCTS data generation with `laneCount` games in parallel.
    /// Each simulation round issues one batched network call for all active lanes.
@@ -294,7 +288,6 @@ public struct DataGenerator {
             rng: SeededRandomNumberGenerator(seed: seed),
             examples: [],
             moves: [],
-            turnCount: 0,
             gameIndex: globalIndex,
             active: true)
       }
@@ -315,7 +308,7 @@ public struct DataGenerator {
          let localIndex = lane.gameIndex - baseGameIndex
          return GameData(
             gameIndex: lane.gameIndex, seed: baseSeed + UInt64(localIndex),
-            playerCount: playerCount, winner: winner, turnCount: lane.turnCount,
+            playerCount: playerCount, winner: winner, turnCount: lane.game.currentTurn,
             examples: examplesWithValues, moves: lane.moves)
       }
 
@@ -358,7 +351,7 @@ public struct DataGenerator {
             guard lanes[i].active else { continue }
 
             // Check timeout
-            if lanes[i].turnCount >= maxTurns {
+            if lanes[i].game.currentTurn >= maxTurns {
                print("Warning: Game \(lanes[i].gameIndex) reached maximum turn limit (\(maxTurns))")
                if nextGameIndex < gameCount, let lane = initLane(nextGameIndex) {
                   lanes[i] = lane; nextGameIndex += 1
@@ -370,14 +363,14 @@ public struct DataGenerator {
 
             let policy = mctsSearch.visitCountPolicy(root: lanes[i].mctsRoot, temperature: temperature)
             if mctsSearch.debug && i == 0 {
-               mctsSearch.printSearchResults(root: lanes[i].mctsRoot, policy: policy, turn: lanes[i].turnCount)
+               mctsSearch.printSearchResults(root: lanes[i].mctsRoot, policy: policy, turn: lanes[i].game.currentTurn)
             }
             let currentPlayer = lanes[i].game.currentPlayer
             let stateEncoding = lanes[i].game.encoding().map { Float($0) }
-            let moveIndex = sampleMove(from: policy, rng: &lanes[i].rng)
+            let moveIndex = sampleMoveFromPolicy(policy, rng: &lanes[i].rng)
 
             lanes[i].examples.append(TrainingExample(
-               turnNumber: lanes[i].turnCount, playerIndex: currentPlayer,
+               turnNumber: lanes[i].game.currentTurn, playerIndex: currentPlayer,
                state: stateEncoding, policy: policy, value: 0.0))
             lanes[i].moves.append((playerIndex: currentPlayer, moveIndex: moveIndex))
 
@@ -388,7 +381,6 @@ public struct DataGenerator {
             // rebuilding the tree from nothing. Falls back to a fresh node when the
             // child was never expanded (e.g. move sampled from the prior fallback).
             lanes[i].mctsRoot = lanes[i].mctsRoot.child(action: moveIndex) ?? MCTSNode()
-            lanes[i].turnCount += 1
 
             // Check if game is complete
             if case .inProgress = lanes[i].game.terminalCondition { } else {
@@ -415,6 +407,7 @@ public struct DataGenerator {
       public let successfulGames: Int
       public let timedOutGames: Int
       public let totalExamples: Int
+      public let totalTurns: Int
       public let outputFile: String
       public let outputBytesUncompressed: Int
       public let outputBytesCompressed: Int
@@ -515,6 +508,7 @@ public struct DataGenerator {
 
       let successfulGames = allGameData.count
       let totalExamples = allGameData.reduce(0) { $0 + $1.examples.count }
+      let totalTurns = allGameData.reduce(0) { $0 + $1.turnCount }
       print("\nCreating dataset with \(totalExamples) examples from \(successfulGames) games...")
 
       let dataset = TrainingDataset(
@@ -533,7 +527,8 @@ public struct DataGenerator {
       print("\nTraining data generation complete!")
       print("  Successful games: \(successfulGames)/\(gameCount)")
       print("  Total training examples: \(totalExamples)")
-      print("  Average examples per game: \(totalExamples / max(successfulGames, 1))")
+      print("  Average examples per game: \(totalExamples / max(successfulGames, 1))  (decisions, includes discards)")
+      print("  Average turns per game:    \(totalTurns / max(successfulGames, 1))  (completed player turns)")
       print("  Saved to: \(outputPath).bin.lz4")
 
       // Print move statistics
@@ -545,6 +540,7 @@ public struct DataGenerator {
          successfulGames: successfulGames,
          timedOutGames: gameCount - successfulGames,
          totalExamples: totalExamples,
+         totalTurns: totalTurns,
          outputFile: outputPath + ".bin.lz4",
          outputBytesUncompressed: uncompressedBytes,
          outputBytesCompressed: compressedBytes,
@@ -628,6 +624,7 @@ public struct DataGenerator {
                timedOutGames:          stats.timedOutGames,
                totalExamples:          stats.totalExamples,
                avgExamplesPerGame:     Double(stats.totalExamples) / Double(max(stats.successfulGames, 1)),
+               avgTurnsPerGame:        Double(stats.totalTurns) / Double(max(stats.successfulGames, 1)),
                outputFile:             stats.outputFile,
                outputBytesUncompressed: stats.outputBytesUncompressed,
                outputBytesCompressed:   stats.outputBytesCompressed,

@@ -33,10 +33,16 @@ def avgEvalTurns (gen):
 
 
 def trainDataTurns (gen):
-   """Average turns per game in this generation's generated training data, or
-   None for the data-start first generation (no generation step happened)."""
+   """Average completed player turns per game in this generation's generated
+   training data, or None for the data-start first generation (no generation
+   step happened). Falls back to avgExamplesPerGame for reports written before
+   avgTurnsPerGame existed (note: that older field counts decisions including
+   discard sub-moves, so it over-reports turns)."""
    g = gen.get("generate")
-   return g["results"]["avgExamplesPerGame"] if g else None
+   if not g:
+      return None
+   res = g["results"]
+   return res.get("avgTurnsPerGame", res["avgExamplesPerGame"])
 
 
 # ── Cell formatters ────────────────────────────────────────────────────────────

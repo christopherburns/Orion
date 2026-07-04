@@ -31,6 +31,21 @@ public struct GameplayTester {
       opts.addOption("Gameplay Tester", "b", "batch-size", "Number of games to run in parallel (default: 64)")
       opts.addOption("Gameplay Tester", "", "serial", "Force single-threaded evaluation (default: concurrent)", requireArgument: false)
       opts.addOption("Gameplay Tester", "", "precision", "Numeric precision for the neural agent: fp32, bf16, fp16 (default: fp32)")
+      opts.addOption("Gameplay Tester", "", "monte-carlo-samples", "MCTS simulations per move (0 = disabled, use raw policy prediction; default: 0)")
+      opts.addOption("Gameplay Tester", "", "determinizations", "Independent hidden-deck-order samples searched per move and aggregated together — avoids the search exploiting deck order no real player could see (default: 8)",
+         longDoc:
+            "Splendor's only hidden information is the face-down portion of each " +
+            "tier's deck: nobody, including this engine, knows what card is " +
+            "under the visible row until it's drawn. Naively running MCTS " +
+            "directly against the game's one true (but player-invisible) deck " +
+            "order would let the search exploit knowledge no real opponent has. " +
+            "Instead, each move samples this many independent random reshuffles " +
+            "of the still-hidden cards (see Game.determinized(seed:)), runs a " +
+            "full search on each, and aggregates visit counts across all of " +
+            "them before picking a move. Only used when --monte-carlo-samples " +
+            "is enabled; self-play data generation does not need this.")
+      opts.addOption("Gameplay Tester", "", "mcts-leaf-batch", "Leaves selected per MCTS round via virtual loss, same as `orion generate` (default: 8)")
+      opts.addOption("Gameplay Tester", "", "c-puct", "MCTS exploration constant (default: 1.5)")
       opts.addOption("Gameplay Tester", "", "report-json", "Write a structured JSON report of inputs and results to this path")
    }
 
@@ -60,6 +75,10 @@ public struct GameplayTester {
          let maxTurns: Int
          let seed: UInt64
          let batchSize: Int
+         let monteCarloSamples: Int
+         let determinizations: Int
+         let cPuct: Float
+         let mctsLeafBatch: Int
       }
 
       struct PerPlayerResult: Encodable {
@@ -340,9 +359,10 @@ public struct GameplayTester {
       struct EvalLane {
          var game: Splendor.Game
          var rng: SeededRandomNumberGenerator
-         var turnCount: Int
          var gameIndex: Int
          var active: Bool
+         // Turn count comes from game.currentTurn, which counts player turns
+         // correctly (a discard sub-move does not advance it).
       }
 
       let actualLanes = min(laneCount, gameCount)
@@ -351,7 +371,7 @@ public struct GameplayTester {
       func initLane (_ gameIndex: Int) -> EvalLane? {
          let gameSeed = seed + UInt64(gameIndex)
          guard let game = Splendor.Game(playerCount: playerCount, seed: gameSeed) else { return nil }
-         return EvalLane(game: game, rng: SeededRandomNumberGenerator(seed: gameSeed), turnCount: 0, gameIndex: gameIndex, active: true)
+         return EvalLane(game: game, rng: SeededRandomNumberGenerator(seed: gameSeed), gameIndex: gameIndex, active: true)
       }
 
       var lanes = (0..<actualLanes).compactMap { initLane($0) }
@@ -364,8 +384,8 @@ public struct GameplayTester {
          // Group active lanes by current player index
          var groupsByPlayer: [Int: [Int]] = [:]  // playerIndex -> [lane indices]
          for i in lanes.indices where lanes[i].active {
-            if lanes[i].turnCount >= maxTurns {
-               results.append((condition: .timedOut, turnCount: lanes[i].turnCount))
+            if lanes[i].game.currentTurn >= maxTurns {
+               results.append((condition: .timedOut, turnCount: lanes[i].game.currentTurn))
                if nextGameIndex < gameCount, let lane = initLane(nextGameIndex) {
                   lanes[i] = lane; nextGameIndex += 1
                } else {
@@ -397,16 +417,207 @@ public struct GameplayTester {
                }
 
                lanes[laneIdx].game.applyMove(canonicalMoveIndex: moveIndex)
-               lanes[laneIdx].turnCount += 1
 
                // Check terminal
                if case .inProgress = lanes[laneIdx].game.terminalCondition {} else {
-                  results.append((condition: lanes[laneIdx].game.terminalCondition, turnCount: lanes[laneIdx].turnCount))
+                  results.append((condition: lanes[laneIdx].game.terminalCondition, turnCount: lanes[laneIdx].game.currentTurn))
                   if nextGameIndex < gameCount, let lane = initLane(nextGameIndex) {
                      lanes[laneIdx] = lane; nextGameIndex += 1
                   } else {
                      lanes[laneIdx].active = false
                   }
+               }
+            }
+         }
+      }
+
+      return results
+   }
+
+
+   /// Batched game evaluation using determinized MCTS search instead of raw
+   /// single-ply policy prediction — see Game.determinized(seed:) for why this
+   /// is necessary. Splendor's only hidden information is each tier's face-down
+   /// deck order, unknown to every player including this engine. Searching
+   /// directly against the game's one true internal deck order would let the
+   /// search see draws no real opponent could predict. Instead, each move
+   /// independently reshuffles the hidden cards `determinizations` times, runs
+   /// a full search on each reshuffle, and aggregates visit counts across all
+   /// of them before picking a move — so the chosen move never depends on any
+   /// single, player-invisible resolution of the unknown deck order.
+   ///
+   /// Self-play data generation (DataGenerator) does not use this: full
+   /// information there is a fair, symmetric training signal (every game is
+   /// bootstrapped from the same source of self-play), not a competitive-play
+   /// advantage, so it is left untouched.
+   ///
+   /// Structurally this mirrors `batchedPlayGames` above — concurrent game
+   /// lanes, replenished from a shared queue as each finishes — but every lane
+   /// additionally carries `determinizations` parallel search trees for its
+   /// current decision point. All lanes' pending leaf evaluations in a round
+   /// are grouped by whichever player is to move at that leaf (which can differ
+   /// from the lane's root player, since a tree can look several plies ahead)
+   /// and routed to that player's own agent — matchups can mix different agents
+   /// (e.g. champion vs. heuristic), unlike self-play's single shared agent.
+   static func batchedPlayGamesWithMCTS (
+      gameCount: Int,
+      playerCount: Int,
+      seed: UInt64,
+      agents: [any AgentProtocol],
+      temperature: Float,
+      maxTurns: Int,
+      laneCount: Int,
+      monteCarloSamples: Int,
+      determinizations: Int,
+      cPuct: Float,
+      mctsLeafBatch: Int,
+      baseGameIndex: Int = 0) -> [(condition: GameTerminalCondition, turnCount: Int)] {
+
+      precondition(determinizations >= 1, "determinizations must be at least 1")
+
+      struct DeterminizationLane {
+         var game: Splendor.Game        // true, observed state — never itself determinized
+         var roots: [MCTSNode]          // one search tree per determinization
+         var determinizedGames: [Splendor.Game]  // matching determinized copies, fixed for this decision
+         var rng: SeededRandomNumberGenerator
+         var gameIndex: Int
+         var active: Bool
+         // Turn count comes from game.currentTurn, which counts player turns
+         // correctly (a discard sub-move does not advance it).
+      }
+
+      let actualLanes = min(laneCount, gameCount)
+      var nextGameIndex = actualLanes
+      var results: [(condition: GameTerminalCondition, turnCount: Int)] = []
+
+      // Seed for determinization draws, advanced independently of any game's own
+      // seed so reshuffles don't correlate with (and can't leak) the true order.
+      var nextDeterminizationSeed: UInt64 = seed &+ 0x9E37_79B9_7F4A_7C15
+
+      // DumbAgent's predict() returns a coin-flip value estimate (see
+      // RandomAgent.swift) — it's fine as a raw single-ply policy (its logits
+      // are legitimately uniform), but MCTS's exploitation term would treat
+      // that coin-flip as a real skill signal and chase whichever branch
+      // happened to get lucky early backprops, corrupting "random" into
+      // something that isn't actually uniform. So DumbAgent's moves always
+      // skip search — see the raw-sampling branch in the move-application
+      // phase below — and this returns empty (no trees to build).
+      func freshDeterminizations (for game: Splendor.Game) -> (roots: [MCTSNode], detGames: [Splendor.Game]) {
+         guard !(agents[game.currentPlayer] is DumbAgent) else { return ([], []) }
+
+         var games: [Splendor.Game] = []
+         games.reserveCapacity(determinizations)
+         for _ in 0..<determinizations {
+            games.append(game.determinized(seed: nextDeterminizationSeed))
+            nextDeterminizationSeed &+= 1
+         }
+         let roots = (0..<determinizations).map { _ in MCTSNode() }
+         return (roots, games)
+      }
+
+      func initLane (_ gameIndex: Int) -> DeterminizationLane? {
+         let globalIndex = baseGameIndex + gameIndex
+         let gameSeed = seed + UInt64(gameIndex)
+         guard let game = Splendor.Game(playerCount: playerCount, seed: gameSeed) else { return nil }
+         let (roots, detGames) = freshDeterminizations(for: game)
+         return DeterminizationLane(
+            game: game, roots: roots, determinizedGames: detGames,
+            rng: SeededRandomNumberGenerator(seed: gameSeed), gameIndex: globalIndex, active: true)
+      }
+
+      var lanes = (0..<actualLanes).compactMap { initLane($0) }
+
+      for agent in agents { agent.prepareForInference() }
+
+      // Only used for its agent-agnostic tree-walk/backprop methods
+      // (selectLeavesWithVirtualLoss, completeEvaluation) — network calls are
+      // routed to each leaf's own player's agent manually below, since a
+      // matchup can involve more than one agent. `agents[0]` here is never
+      // actually queried.
+      let mctsHelper = MCTSSearch(agent: agents[0], monteCarloSamples: monteCarloSamples, cPuct: cPuct)
+      let leafBatch = max(1, mctsLeafBatch)
+      let roundCount = (monteCarloSamples + leafBatch - 1) / leafBatch
+
+      while lanes.contains(where: { $0.active }) {
+         // --- Simulation phase: batched selection + eval across every lane's
+         // determinizations, grouped by whichever player is to move at each leaf.
+         for _ in 0..<roundCount {
+            var pendingByPlayer: [Int: [(laneIdx: Int, result: SelectionResult)]] = [:]
+
+            for i in lanes.indices where lanes[i].active {
+               // Empty roots means the current mover is a DumbAgent this
+               // decision — no tree to search, handled by raw sampling below.
+               for d in lanes[i].roots.indices {
+                  let leafResults = mctsHelper.selectLeavesWithVirtualLoss(
+                     root: lanes[i].roots[d], game: lanes[i].determinizedGames[d], count: leafBatch)
+                  for result in leafResults {
+                     let player = result.leafGame.currentPlayer
+                     pendingByPlayer[player, default: []].append((i, result))
+                  }
+               }
+            }
+
+            for (player, group) in pendingByPlayer {
+               let leafGames: [any GameProtocol] = group.map { $0.result.leafGame }
+               let playerIndices = group.map { $0.result.leafGame.currentPlayer }
+               let predictions = agents[player].batchPredict(games: leafGames, currentPlayerIndices: playerIndices)
+               for (j, entry) in group.enumerated() {
+                  mctsHelper.completeEvaluation(result: entry.result, logits: predictions[j].policyLogits, value: predictions[j].valueEstimate)
+               }
+            }
+         }
+
+         // --- Move application phase ---
+         for i in lanes.indices where lanes[i].active {
+            if lanes[i].game.currentTurn >= maxTurns {
+               results.append((condition: .timedOut, turnCount: lanes[i].game.currentTurn))
+               if nextGameIndex < gameCount, let lane = initLane(nextGameIndex) {
+                  lanes[i] = lane; nextGameIndex += 1
+               } else {
+                  lanes[i].active = false
+               }
+               continue
+            }
+
+            let moveIndex: Int
+            if lanes[i].roots.isEmpty {
+               // DumbAgent's turn — search would corrupt its behavior (see
+               // freshDeterminizations above), so fall back to the same raw
+               // temperature-based sampling batchedPlayGames uses.
+               let player = lanes[i].game.currentPlayer
+               let (logits, _) = agents[player].predict(game: lanes[i].game, currentPlayerIndex: player)
+               let validMoveMask = lanes[i].game.legalMoveMaskForCurrentPlayer()
+               let moveResult = temperature > 0
+                  ? sampleMoveWithTemperature(logits: logits, validMoveMask: validMoveMask, temperature: temperature, rng: &lanes[i].rng)
+                  : sampleMove(validMoveMask: validMoveMask, movePreferences: logits).map { ($0, [Float]()) }
+               guard let (idx, _) = moveResult else {
+                  preconditionFailure("No valid moves in determinized eval for game \(lanes[i].gameIndex)")
+               }
+               moveIndex = idx
+            } 
+            else {
+               // Temperature is handled inside aggregatedPolicy (temp≈0
+               // collapses to a one-hot on the most-visited action), so no
+               // separate greedy branch is needed here.
+               let policy = MCTSSearch.aggregatedPolicy(roots: lanes[i].roots, temperature: temperature)
+               moveIndex = sampleMoveFromPolicy(policy, rng: &lanes[i].rng)
+            }
+
+            lanes[i].game.applyMove(canonicalMoveIndex: moveIndex)
+
+            if case .inProgress = lanes[i].game.terminalCondition {
+               // Same game continues — re-determinize for the next decision point.
+               let (roots, detGames) = freshDeterminizations(for: lanes[i].game)
+               lanes[i].roots = roots
+               lanes[i].determinizedGames = detGames
+            }
+            else {
+               results.append((condition: lanes[i].game.terminalCondition, turnCount: lanes[i].game.currentTurn))
+               if nextGameIndex < gameCount, let lane = initLane(nextGameIndex) {
+                  lanes[i] = lane; nextGameIndex += 1
+               } 
+               else {
+                  lanes[i].active = false
                }
             }
          }
@@ -431,6 +642,10 @@ public struct GameplayTester {
       let serial = opts.wasProvided(option: "serial")
       let precisionStr = opts.get(option: "precision", orElse: "fp32")
       let precision = parsePrecision(precisionStr)
+      let monteCarloSamples = opts.get(option: "monte-carlo-samples", orElse: 0)
+      let determinizations = opts.get(option: "determinizations", orElse: 8)
+      let cPuct = opts.get(option: "c-puct", orElse: Float(1.5))
+      let mctsLeafBatch = opts.get(option: "mcts-leaf-batch", orElse: 8)
       let reportPath: String? = opts.get(option: "report-json")
       let startDate = Date()
 
@@ -443,6 +658,10 @@ public struct GameplayTester {
       print("  Temperature:      \(String(format: "%.2f", temperature))")
       print("  Max turns:        \(maxTurns)")
       print("  Seed:             \(seed)")
+      if monteCarloSamples > 0 {
+         print("  MCTS sims/move:   \(monteCarloSamples)  (c_puct=\(cPuct), leaf batch=\(mctsLeafBatch))")
+         print("  Determinizations: \(determinizations)  (independent hidden-deck reshuffles per move, aggregated)")
+      }
 
       // Initialize agents based on command-line specifications
       let agents = initializeAgents(playerCount: playerCount, agentSpecs: agentSpecs, seed: seed, precision: precision)
@@ -483,15 +702,32 @@ public struct GameplayTester {
          workQueue.async {
             let taskAgents = initializeAgents(playerCount: playerCount, agentSpecs: agentSpecs, seed: taskBaseSeed, precision: precision)
 
-            let results = batchedPlayGames(
-               gameCount: taskGameCount,
-               playerCount: playerCount,
-               seed: taskBaseSeed,
-               agents: taskAgents,
-               temperature: temperature,
-               maxTurns: maxTurns,
-               laneCount: taskGameCount,
-               baseGameIndex: taskOffset)
+            let results: [(condition: GameTerminalCondition, turnCount: Int)]
+            if monteCarloSamples > 0 {
+               results = batchedPlayGamesWithMCTS(
+                  gameCount: taskGameCount,
+                  playerCount: playerCount,
+                  seed: taskBaseSeed,
+                  agents: taskAgents,
+                  temperature: temperature,
+                  maxTurns: maxTurns,
+                  laneCount: taskGameCount,
+                  monteCarloSamples: monteCarloSamples,
+                  determinizations: determinizations,
+                  cPuct: cPuct,
+                  mctsLeafBatch: mctsLeafBatch,
+                  baseGameIndex: taskOffset)
+            } else {
+               results = batchedPlayGames(
+                  gameCount: taskGameCount,
+                  playerCount: playerCount,
+                  seed: taskBaseSeed,
+                  agents: taskAgents,
+                  temperature: temperature,
+                  maxTurns: maxTurns,
+                  laneCount: taskGameCount,
+                  baseGameIndex: taskOffset)
+            }
 
             taskResults[taskIndex] = results
             resultQueue.async {
@@ -572,13 +808,17 @@ public struct GameplayTester {
             completedAt:    Report.timestamp(endDate),
             elapsedSeconds: endDate.timeIntervalSince(startDate),
             parameters: PlayReport.Parameters(
-               agents:      agentSpecsForReport,
-               gameCount:   gameCount,
-               playerCount: playerCount,
-               temperature: temperature,
-               maxTurns:    maxTurns,
-               seed:        seed,
-               batchSize:   batchSize),
+               agents:            agentSpecsForReport,
+               gameCount:         gameCount,
+               playerCount:       playerCount,
+               temperature:       temperature,
+               maxTurns:          maxTurns,
+               seed:              seed,
+               batchSize:         batchSize,
+               monteCarloSamples: monteCarloSamples,
+               determinizations:  determinizations,
+               cPuct:             cPuct,
+               mctsLeafBatch:     mctsLeafBatch),
             results: PlayReport.Results(
                totalGames:      gameCount,
                decisiveGames:   decisiveCount,
