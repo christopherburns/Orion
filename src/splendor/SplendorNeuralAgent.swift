@@ -49,7 +49,7 @@ public class PolicyValueNetwork: Module {
    public let precision: DType
 
    // Current architecture version - increment when architecture changes
-   public static let ARCHITECTURE_VERSION = 7
+   public static let ARCHITECTURE_VERSION = 8
 
    // Shared trunk layers
    let dense1: Linear

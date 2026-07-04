@@ -629,7 +629,7 @@ public struct Game: GameProtocol {
       }
 
       // 1: current turn
-      encoded.append(Float16(tanh(Float(self.currentTurn))))
+      encoded.append(Float16(tanh(min(1.0, Float(self.currentTurn)/100.0))))
 
       precondition(encoded.count == Game.GAME_STATE_ENCODING_SIZE, "Encoded size mismatch: expected \(Game.GAME_STATE_ENCODING_SIZE), got \(encoded.count)")
       return encoded
