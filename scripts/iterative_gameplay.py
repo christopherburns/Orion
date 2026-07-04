@@ -18,38 +18,44 @@ Usage:
    iterative_gameplay.py RUN_DIR (--initial-model PATH | --initial-data PATH) [options]
 
 Options:
-   --initial-model PATH        Initial model to start self-play from (gen 1 begins with generate)
-   --initial-data PATH         Initial training data to start from (gen 1 begins with train; skip generate)
-   --games-per-generation N    Games to generate per generation                  [default: 5000]
-   --epochs N                  Training epochs per generation                    [default: 100]
-   --training-batch-size N     Training batch size                               [default: 256]
-   --generate-batch-size N     Games to run in parallel during MCTS generation   [default: 128]
-   --generations N             Total number of generations to run                [default: 15]
-   --eval-games N              Games to play when evaluating                     [default: 500]
-   --champion-threshold N      Min win rate vs previous to accept new model (0=off)   [default: 0.52]
-   --early-stopping N          Stop training after N epochs w/out improvement (0=off) [default: 10]
-   --initial-temp TEMP         Sampling temperature for generation 1             [default: 1.5]
-   --final-temp TEMP           Sampling temperature for the last generation      [default: 0.5]
-   --learning-rate R           Learning rate for generation 1                    [default: 0.0003]
-   --lr-decay R                Multiplicative LR decay per generation (1.0 = no decay) [default: 0.95]
-   --weight-decay N            Weight decay rate                                 [default: 0.0]
-   --eval-temp TEMP            Sampling temperature during evaluation (0=greedy) [default: 0.1]
-   --dropout N                 Dropout rate for trunk layers (0=disabled)        [default: 0.1]
-   --monte-carlo-samples N     MCTS samples per move for data generation (0=disabled)  [default: 25]
-   --mcts-leaf-batch N         Leaves per MCTS round via virtual loss (generation)     [default: 8]
-   --c-puct N                  MCTS exploration constant (generation)                  [default: 1.5]
-   --eval-monte-carlo-samples N   MCTS samples per move during evaluation (0=disabled) [default: 200]
-   --eval-determinizations N   Hidden-deck reshuffles aggregated per eval move          [default: 8]
-   --eval-mcts-leaf-batch N    Leaves per MCTS round via virtual loss (evaluation)      [default: 8]
-   --eval-c-puct N             MCTS exploration constant (evaluation)                   [default: 1.5]
-   --accumulate-data           Train on all previous generations' data, not just the latest
-   --binary PATH               Path to the orion binary                          [default: .build/release/orion]
-   -h --help                   Show this help message
+   --initial-model PATH          Initial model to start self-play from (gen 1 begins with generate)
+   --initial-data PATH           Initial training data to start from (gen 1 begins with train; skip generate)
+   --generations N               Total number of generations to run                         [default: 15]
+   --binary PATH                 Path to the orion binary                                   [default: .build/release/orion]
+   -h --help                     Show this help message
+  Data generation:
+   --target-examples N           Target training examples per generation                    [default: 120000]
+   --generate-batch-size N       Games to run in parallel during MCTS generation            [default: 128]
+   --initial-temp TEMP           Sampling temperature for generation 1                      [default: 1.5]
+   --final-temp TEMP             Sampling temperature for the last generation               [default: 0.5]
+   --monte-carlo-samples N       MCTS samples per move for data generation (0=disabled)     [default: 25]
+   --mcts-leaf-batch N           Leaves per MCTS round via virtual loss (generation)        [default: 8]
+   --c-puct N                    MCTS exploration constant (generation)                     [default: 1.5]
+  Training:
+   --epochs N                    Training epochs per generation                             [default: 100]
+   --training-batch-size N       Training batch size                                        [default: 256]
+   --learning-rate R             Learning rate for generation 1                             [default: 0.0003]
+   --lr-decay R                  Multiplicative LR decay per generation (1.0 = no decay)    [default: 0.95]
+   --weight-decay N              Weight decay rate                                          [default: 1e-4]
+   --dropout N                   Dropout rate for trunk layers (0=disabled)                 [default: 0.1]
+   --early-stopping N            Stop training after N epochs w/out improvement (0=off)     [default: 10]
+   --accumulate-window N         Train on the last N generations of data (1 = newest only)  [default: 10]
+  Evaluation:
+   --eval-games N                Games to play when evaluating                              [default: 500]
+   --champion-threshold N        Min win rate vs previous to accept new model (0=off)       [default: 0.52]
+   --eval-temp TEMP              Sampling temperature during evaluation (0=greedy)          [default: 0.1]
+   --eval-monte-carlo-samples N  MCTS samples per move during evaluation (0=disabled)       [default: 200]
+   --eval-determinizations N     Hidden-deck reshuffles aggregated per eval move            [default: 8]
+   --eval-mcts-leaf-batch N      Leaves per MCTS round via virtual loss (evaluation)        [default: 8]
+   --eval-c-puct N               MCTS exploration constant (evaluation)                     [default: 1.5]
 """
 
 import datetime
 import json
+import math
 import os
+import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, asdict
@@ -74,7 +80,6 @@ class Config:
    runDir:              str
    initialModel:        Optional[str]
    initialData:         Optional[str]
-   gamesPerGeneration:  int
    epochs:              int
    trainingBatchSize:   int
    generateBatchSize:   int
@@ -96,8 +101,9 @@ class Config:
    evalDeterminizations:  int
    evalMctsLeafBatch:     int
    evalCPuct:             float
-   accumulateData:      bool
+   accumulateWindow:    int
    binary:              str
+   targetExamples:      int
 
 
 # ── Shell helpers ──────────────────────────────────────────────────────────────
@@ -147,11 +153,11 @@ def runOrion (args: list[str], label: str, reportPath: str) -> Optional[dict]:
 
 # ── Step functions (each returns the structured report dict, or None on failure) ─
 
-def generateData (cfg: Config, outputPath: str, agent: str, temperature: float, reportPath: str) -> Optional[dict]:
+def generateData (cfg: Config, outputPath: str, agent: str, temperature: float, reportPath: str, gameCount: int) -> Optional[dict]:
    args = [
       cfg.binary, "generate",
       "-o", outputPath,
-      "-n", str(cfg.gamesPerGeneration),
+      "-n", str(gameCount),
       "-a", agent,
       "-t", f"{temperature:.2f}",
    ]
@@ -228,13 +234,64 @@ def modelPath (cfg: Config, gen: int) -> str:
 def dataPath (cfg: Config, gen: int) -> str:
    """Path for data generated by the model at the START of `gen` (the previous
    champion). Generation 1's data is generated by the bootstrap model and labelled g00."""
-   return f"{cfg.runDir}/trainingdata/data_g{genStr(cfg, gen - 1)}_{cfg.gamesPerGeneration}"
+   return f"{cfg.runDir}/trainingdata/data_g{genStr(cfg, gen - 1)}"
+
+
+# Crude examples-per-game prior used only to size the very first generate step,
+# before any generation has produced a measured rate. Deliberately on the low
+# side so the bootstrap generation slightly overshoots --target-examples rather
+# than starving it; every later generation self-corrects from the real rate.
+BOOTSTRAP_EXAMPLES_PER_GAME = 100
+
+def gamesForGeneration (cfg: Config, gen: int) -> int:
+   """Compute game count for this generation's generate step.
+   Uses the previous generation's realized examples-per-game rate to hit
+   cfg.targetExamples. On the bootstrap generation (no prior generate report
+   yet), estimates from the BOOTSTRAP_EXAMPLES_PER_GAME constant instead."""
+   try:
+      prevReport = readJson(reportFile(cfg, gen - 1, "generate"))
+      avgExamplesPerGame = prevReport["results"]["avgExamplesPerGame"]
+   except Exception:
+      avgExamplesPerGame = BOOTSTRAP_EXAMPLES_PER_GAME
+   return math.ceil(cfg.targetExamples / avgExamplesPerGame)
 
 def reportFile (cfg: Config, gen: int, kind: str) -> str:
    return f"{cfg.runDir}/gen_{genStr(cfg, gen)}_{kind}.json"
 
 def masterFile (cfg: Config) -> str:
    return f"{cfg.runDir}/run.json"
+
+
+_DATA_FILE_RE = re.compile(r'^data_g(\d+)\.(bin\.lz4|gz)$')
+
+def pruneStaleData (cfg: Config, gen: int) -> None:
+   """Move data files outside the sliding window into trainingdata/stale/.
+
+   The window keeps the newest cfg.accumulateWindow labels. At generation gen
+   the newest label present is gen-1, so labels < gen - cfg.accumulateWindow
+   are stale and get moved."""
+   trainingDir = os.path.join(cfg.runDir, "trainingdata")
+   staleDir    = os.path.join(trainingDir, "stale")
+   cutoff      = gen - cfg.accumulateWindow   # labels strictly below this are stale
+
+   try:
+      entries = os.listdir(trainingDir)
+   except FileNotFoundError:
+      return
+
+   for name in entries:
+      fullPath = os.path.join(trainingDir, name)
+      if not os.path.isfile(fullPath):
+         continue                              # skip subdirs (including stale/)
+      m = _DATA_FILE_RE.match(name)
+      if m is None:
+         continue                              # not a data file we manage
+      label = int(m.group(1))
+      if label < cutoff:
+         os.makedirs(staleDir, exist_ok=True)
+         dest = os.path.join(staleDir, name)
+         shutil.move(fullPath, dest)
+         print(f"  [prune] moved {name} → stale/ (label {label} < cutoff {cutoff})")
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
@@ -247,14 +304,17 @@ def runGeneration (cfg: Config, gen: int, prevModel: str) -> tuple[str, dict]:
 
    data = dataPath(cfg, gen)
    currentModel = modelPath(cfg, gen)
+   gameCount = gamesForGeneration(cfg, gen)
 
-   print(f"Generating {cfg.gamesPerGeneration} games with {prevModel}...")
-   generateReport = generateData(cfg, data, f"{prevModel}/", temp, reportFile(cfg, gen, "generate"))
+   print(f"Generating {gameCount} games with {prevModel}...")
+   generateReport = generateData(cfg, data, f"{prevModel}/", temp, reportFile(cfg, gen, "generate"), gameCount)
    if generateReport is None:
       sys.exit(1)
 
+   pruneStaleData(cfg, gen)
+
    print(f"Training model (continuing from {prevModel})...")
-   trainingInput = f"{cfg.runDir}/trainingdata" if cfg.accumulateData else f"{data}.bin.lz4"
+   trainingInput = f"{cfg.runDir}/trainingdata"
    trainReport = trainModel(cfg, trainingInput, currentModel, lr,
                             prevModelPath=f"{prevModel}/",
                             reportPath=reportFile(cfg, gen, "train"))
@@ -358,7 +418,6 @@ def configFromArgs (args: dict) -> Config:
       runDir              = args["RUN_DIR"],
       initialModel        = args["--initial-model"],
       initialData         = args["--initial-data"],
-      gamesPerGeneration  = int(args["--games-per-generation"]),
       epochs              = int(args["--epochs"]),
       trainingBatchSize   = int(args["--training-batch-size"]),
       generateBatchSize   = int(args["--generate-batch-size"]),
@@ -380,8 +439,9 @@ def configFromArgs (args: dict) -> Config:
       evalDeterminizations  = int(args["--eval-determinizations"]),
       evalMctsLeafBatch     = int(args["--eval-mcts-leaf-batch"]),
       evalCPuct             = float(args["--eval-c-puct"]),
-      accumulateData      = bool(args["--accumulate-data"]),
+      accumulateWindow    = int(args["--accumulate-window"]),
       binary              = args["--binary"],
+      targetExamples      = int(args["--target-examples"]),
    )
 
 

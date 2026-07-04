@@ -71,10 +71,10 @@ def main ():
 
    print(f"Run:      {r.get('runDir', '?')}")
    print(f"Started:  {r.get('startedAt', '?')}")
-   print(f"Config:   games/gen={cfg.get('gamesPerGeneration')}  "
+   print(f"Config:   target-ex={cfg.get('targetExamples')}  "
          f"mc={cfg.get('monteCarloSamples')}  epochs={cfg.get('epochs')}  "
          f"batch={cfg.get('trainingBatchSize')}  lr={cfg.get('learningRate')}  "
-         f"eval-games={cfg.get('evalGames')}  accumulate={cfg.get('accumulateData')}")
+         f"eval-games={cfg.get('evalGames')}  window={cfg.get('accumulateWindow')}")
    print()
 
    header = (f"{'Gen':>3}  {'vs Rand':>7}  {'vs Heur':>7}  {'vs Prev':>7}  "

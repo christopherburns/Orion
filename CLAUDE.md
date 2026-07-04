@@ -120,7 +120,7 @@ Game State Encoding — Game.GAME_STATE_ENCODING_SIZE = 496
  351-494  Visible cards: 3 tiers × 4 positions × 12  144   (see card encoding)
           Zero-padded for empty positions.
 ───────────────────────────────────────────────────────────────────────────
- 495      turnNumber                                  1    tanh(currentTurn)
+ 495      turnNumber                                  1    tanh(min(1, currentTurn/100))
 ───────────────────────────────────────────────────────────────────────────
 
 Noble encoding (26 floats each, zero-padded if fewer than 5 nobles):
