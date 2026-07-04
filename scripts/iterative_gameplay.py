@@ -35,9 +35,13 @@ Options:
    --weight-decay N            Weight decay rate                                 [default: 0.0]
    --eval-temp TEMP            Sampling temperature during evaluation (0=greedy) [default: 0.1]
    --dropout N                 Dropout rate for trunk layers (0=disabled)        [default: 0.1]
-   --monte-carlo-samples N     MCTS monteCarloSamples per move (0=disabled)      [default: 25]
-   --mcts-leaf-batch N         Leaves selected per MCTS round via virtual loss   [default: 8]
-   --c-puct N                  MCTS exploration constant                         [default: 1.5]
+   --monte-carlo-samples N     MCTS samples per move for data generation (0=disabled)  [default: 25]
+   --mcts-leaf-batch N         Leaves per MCTS round via virtual loss (generation)     [default: 8]
+   --c-puct N                  MCTS exploration constant (generation)                  [default: 1.5]
+   --eval-monte-carlo-samples N   MCTS samples per move during evaluation (0=disabled) [default: 200]
+   --eval-determinizations N   Hidden-deck reshuffles aggregated per eval move          [default: 8]
+   --eval-mcts-leaf-batch N    Leaves per MCTS round via virtual loss (evaluation)      [default: 8]
+   --eval-c-puct N             MCTS exploration constant (evaluation)                   [default: 1.5]
    --accumulate-data           Train on all previous generations' data, not just the latest
    --binary PATH               Path to the orion binary                          [default: .build/release/orion]
    -h --help                   Show this help message
@@ -88,6 +92,10 @@ class Config:
    monteCarloSamples:   int
    mctsLeafBatch:       int
    cPuct:               float
+   evalMonteCarloSamples: int
+   evalDeterminizations:  int
+   evalMctsLeafBatch:     int
+   evalCPuct:             float
    accumulateData:      bool
    binary:              str
 
@@ -184,6 +192,16 @@ def evaluatePlay (cfg: Config, agentSpecs: list[str], reportPath: str) -> Option
       "-a", *agentSpecs,
       "-t", f"{cfg.evalTemp:.2f}",
    ]
+   # Deliberately separate from the generation-side MCTS settings above: a
+   # "random" opponent's moves fall back to raw prediction automatically
+   # (its value estimate is a coin flip, not a real signal — search would
+   # corrupt rather than improve it), so it's safe to leave these on for
+   # every matchup, including evalVsRandom.
+   if cfg.evalMonteCarloSamples > 0:
+      args += ["--monte-carlo-samples", str(cfg.evalMonteCarloSamples),
+               "--determinizations", str(cfg.evalDeterminizations),
+               "--mcts-leaf-batch", str(cfg.evalMctsLeafBatch),
+               "--c-puct", str(cfg.evalCPuct)]
    return runOrion(args, "play", reportPath)
 
 
@@ -358,6 +376,10 @@ def configFromArgs (args: dict) -> Config:
       monteCarloSamples   = int(args["--monte-carlo-samples"]),
       mctsLeafBatch       = int(args["--mcts-leaf-batch"]),
       cPuct               = float(args["--c-puct"]),
+      evalMonteCarloSamples = int(args["--eval-monte-carlo-samples"]),
+      evalDeterminizations  = int(args["--eval-determinizations"]),
+      evalMctsLeafBatch     = int(args["--eval-mcts-leaf-batch"]),
+      evalCPuct             = float(args["--eval-c-puct"]),
       accumulateData      = bool(args["--accumulate-data"]),
       binary              = args["--binary"],
    )
