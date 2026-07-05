@@ -37,9 +37,10 @@ func initializeAgents (playerCount: Int, agentSpecs: [String], seed: UInt64, pre
       // Exact match, use each spec for corresponding player
       specs = agentSpecs
    } else {
+      // Fatal: silently substituting random agents would corrupt any
+      // evaluation or training run built on the result.
       print("Error: Number of agent specifications (\(agentSpecs.count)) must be 1 or match player count (\(playerCount))")
-      print("Falling back to random agents for all players")
-      specs = Array(repeating: "random", count: playerCount)
+      exit(1)
    }
 
    var agents: [any AgentProtocol] = []
@@ -72,9 +73,13 @@ func initializeAgents (playerCount: Int, agentSpecs: [String], seed: UInt64, pre
             agent = try SplendorNeuralAgent(url: modelURL, precision: precision)
             print("Loaded neural agent from \(spec) for player \(index)")
          } catch {
+            // Fatal: a model that fails to load (bad path, corrupt weights, or
+            // architecture-version mismatch after an encoding change) must not
+            // be silently replaced by a random agent — every downstream win
+            // rate, champion gate, and training example would be garbage that
+            // looks legitimate. Die loudly instead.
             print("Error: Failed to load model from \(spec) for player \(index): \(error)")
-            print("Falling back to random agent for player \(index)")
-            agent = DumbAgent(prngSeed: seed + UInt64(index))
+            exit(1)
          }
       }
 
