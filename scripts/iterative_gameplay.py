@@ -20,36 +20,38 @@ Usage:
 Options:
    --initial-model PATH          Initial model to start self-play from (gen 1 begins with generate)
    --initial-data PATH           Initial training data to start from (gen 1 begins with train; skip generate)
-   --generations N               Total number of generations to run                         [default: 15]
-   --binary PATH                 Path to the orion binary                                   [default: .build/release/orion]
+   --generations N               Total number of generations to run                           [default: 15]
+   --binary PATH                 Path to the orion binary                                     [default: .build/release/orion]
    -h --help                     Show this help message
   Data generation:
-   --target-examples N           Target training examples per generation                    [default: 120000]
-   --generate-batch-size N       Games to run in parallel during MCTS generation            [default: 128]
-   --initial-temp TEMP           Sampling temperature for generation 1                      [default: 1.5]
-   --final-temp TEMP             Sampling temperature for the last generation               [default: 0.5]
-   --monte-carlo-samples N       MCTS samples per move for data generation (0=disabled)     [default: 800]
-   --mcts-leaf-batch N           Leaves per MCTS round via virtual loss (generation)        [default: 8]
-   --c-puct N                    MCTS exploration constant (generation)                     [default: 1.5]
-   --dirichlet-alpha N           Dirichlet noise concentration (root exploration)           [default: 0.3]
-   --dirichlet-epsilon N         Root-prior weight on Dirichlet noise (0 = disable)         [default: 0.25]
+   --target-examples N           Target training examples per generation                      [default: 120000]
+   --generate-batch-size N       Games to run in parallel during MCTS generation              [default: 128]
+   --initial-temp TEMP           Sampling temperature for generation 1                        [default: 1.5]
+   --final-temp TEMP             Sampling temperature for the last generation                 [default: 0.5]
+   --monte-carlo-samples N       MCTS samples per move for data generation (0=disabled)       [default: 800]
+   --mcts-leaf-batch N           Leaves per MCTS round via virtual loss (generation)          [default: 8]
+   --c-puct N                    MCTS exploration constant (generation)                       [default: 1.5]
+   --dirichlet-alpha N           Dirichlet noise concentration (root exploration)             [default: 0.3]
+   --dirichlet-epsilon N         Root-prior weight on Dirichlet noise (0 = disable)           [default: 0.25]
+   --value-discount N            Value target discount per remaining turn (1.0 = off)         [default: 0.99]
   Training:
-   --epochs N                    Training epochs per generation                             [default: 100]
-   --training-batch-size N       Training batch size                                        [default: 256]
-   --learning-rate R             Learning rate for generation 1                             [default: 0.0003]
-   --lr-decay R                  Multiplicative LR decay per generation (1.0 = no decay)    [default: 0.95]
-   --weight-decay N              Weight decay rate                                          [default: 1e-4]
-   --dropout N                   Dropout rate for trunk layers (0=disabled)                 [default: 0.1]
-   --early-stopping N            Stop training after N epochs w/out improvement (0=off)     [default: 10]
-   --accumulate-window N         Train on the last N generations of data (1 = newest only)  [default: 10]
+   --epochs N                    Training epochs per generation                               [default: 100]
+   --training-batch-size N       Training batch size                                          [default: 256]
+   --learning-rate R             Learning rate for generation 1                               [default: 0.0003]
+   --lr-decay R                  Multiplicative LR decay per generation (1.0 = no decay)      [default: 0.95]
+   --weight-decay N              Weight decay rate                                            [default: 1e-4]
+   --dropout N                   Dropout rate for trunk layers (0=disabled)                   [default: 0.1]
+   --early-stopping N            Stop training after N epochs w/out improvement (0=off)       [default: 10]
+   --accumulate-window N         Train on the last N generations of data (1 = newest only)    [default: 10]
   Evaluation:
-   --eval-games N                Games to play when evaluating                              [default: 500]
-   --champion-threshold N        Min win rate vs previous to accept new model (0=off)       [default: 0.52]
-   --eval-temp TEMP              Sampling temperature during evaluation (0=greedy)          [default: 0.1]
-   --eval-monte-carlo-samples N  MCTS samples per move during evaluation (0=disabled)       [default: 200]
-   --eval-determinizations N     Hidden-deck reshuffles aggregated per eval move            [default: 8]
-   --eval-mcts-leaf-batch N      Leaves per MCTS round via virtual loss (evaluation)        [default: 8]
-   --eval-c-puct N               MCTS exploration constant (evaluation)                     [default: 1.5]
+   --eval-games N                Games to play per evaluation matchup                         [default: 500]
+   --champion-threshold N        Min league win rate to accept new model (0=off)              [default: 0.52]
+   --league-size N               Champions in the gating panel, incl. previous (1 = classic)  [default: 3]
+   --eval-temp TEMP              Sampling temperature during evaluation (0=greedy)            [default: 0.1]
+   --eval-monte-carlo-samples N  MCTS samples per move during evaluation (0=disabled)         [default: 200]
+   --eval-determinizations N     Hidden-deck reshuffles aggregated per eval move              [default: 8]
+   --eval-mcts-leaf-batch N      Leaves per MCTS round via virtual loss (evaluation)          [default: 8]
+   --eval-c-puct N               MCTS exploration constant (evaluation)                       [default: 1.5]
 """
 
 import datetime
@@ -101,6 +103,8 @@ class Config:
    cPuct:               float
    dirichletAlpha:      float
    dirichletEpsilon:    float
+   valueDiscount:       float
+   leagueSize:          int
    evalMonteCarloSamples: int
    evalDeterminizations:  int
    evalMctsLeafBatch:     int
@@ -171,6 +175,7 @@ def generateData (cfg: Config, outputPath: str, agent: str, temperature: float, 
                "--c-puct", str(cfg.cPuct),
                "--dirichlet-alpha", str(cfg.dirichletAlpha),
                "--dirichlet-epsilon", str(cfg.dirichletEpsilon),
+               "--value-discount", str(cfg.valueDiscount),
                "-b", str(cfg.generateBatchSize)]
    return runOrion(args, "generate", reportPath)
 
@@ -300,10 +305,37 @@ def pruneStaleData (cfg: Config, gen: int) -> None:
          print(f"  [prune] moved {name} → stale/ (label {label} < cutoff {cutoff})")
 
 
+# ── League gating ────────────────────────────────────────────────────────────────
+
+def leagueOpponents (championHistory: list, size: int) -> list:
+   """Pick the gating panel from the champion lineage (oldest → newest).
+
+   Always includes the current champion (the candidate's predecessor); the
+   remaining size-1 slots are filled with older champions evenly spaced across
+   the lineage, newest last, so the panel spans eras. Gating against a panel
+   instead of only the predecessor prevents nontransitive drift — a candidate
+   can't pass by counter-picking one opponent's quirks. size=1 reproduces
+   classic previous-champion-only gating. Deterministic (no sampling RNG)."""
+   prev = championHistory[-1]
+   older = championHistory[:-1]
+   extra = min(size - 1, len(older))
+   if extra <= 0:
+      return [prev]
+   if extra == 1:
+      picks = [older[-1]]
+   else:
+      idxs = sorted({round(i * (len(older) - 1) / (extra - 1)) for i in range(extra)})
+      picks = [older[i] for i in idxs]
+   return picks + [prev]
+
+
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
-def runGeneration (cfg: Config, gen: int, prevModel: str) -> tuple[str, dict]:
-   """One self-play generation. Returns (next champion path, generation entry dict for the master record)."""
+def runGeneration (cfg: Config, gen: int, championHistory: list) -> tuple[str, dict]:
+   """One self-play generation. championHistory is the accepted-champion lineage,
+   oldest → newest; its last entry is the current champion (data generator and
+   gating opponent). Returns (next champion path, generation entry dict)."""
+   prevModel = championHistory[-1]
    temp = computeTemperature(cfg, gen)
    lr = generationLearningRate(cfg, gen)
    print(f"\n=== Generation {gen} (temperature: {temp:.2f}, LR: {lr:.6f}) ===")
@@ -339,21 +371,35 @@ def runGeneration (cfg: Config, gen: int, prevModel: str) -> tuple[str, dict]:
    if evalHeuristicReport is None:
       sys.exit(1)
 
-   print(f"Evaluating model vs {prevModel}...")
-   evalPrevReport = evaluatePlay(cfg, [f"{currentModel}/", f"{prevModel}/"],
-                                 reportFile(cfg, gen, "eval_vs_prev"))
-   if evalPrevReport is None:
-      sys.exit(1)
+   # League gating: play the candidate against a panel of past champions and
+   # gate on the MEAN win rate. The previous champion's match is always last
+   # in the panel and is also recorded as evalVsPrev for continuity.
+   league = leagueOpponents(championHistory, cfg.leagueSize)
+   leagueMatches = []
+   for li, opponent in enumerate(league):
+      isPrev = opponent == league[-1] and li == len(league) - 1
+      kind = "eval_vs_prev" if isPrev else f"eval_vs_league_{li}"
+      print(f"Evaluating model vs {opponent}...")
+      report = evaluatePlay(cfg, [f"{currentModel}/", f"{opponent}/"],
+                            reportFile(cfg, gen, kind))
+      if report is None:
+         sys.exit(1)
+      winRate = report["results"]["perPlayer"][0]["winRateOverDecisive"]
+      leagueMatches.append({"opponent": opponent, "winRate": winRate, "report": report})
 
-   # Champion gating: read win rate directly from the structured report.
-   winRateVsPrev = evalPrevReport["results"]["perPlayer"][0]["winRateOverDecisive"]
+   winRateVsPrev = leagueMatches[-1]["winRate"]
+   leagueWinRate = sum(m["winRate"] for m in leagueMatches) / len(leagueMatches)
    accepted = True
    if cfg.championThreshold > 0:
-      if winRateVsPrev < cfg.championThreshold:
-         print(f"New model win rate {winRateVsPrev:.1%} < threshold {cfg.championThreshold:.1%} — keeping previous champion")
+      detail = ", ".join(f"{m['winRate']:.1%} vs {os.path.basename(m['opponent'])}"
+                         for m in leagueMatches)
+      if leagueWinRate < cfg.championThreshold:
+         print(f"League win rate {leagueWinRate:.1%} ({detail}) < threshold "
+               f"{cfg.championThreshold:.1%} — keeping previous champion")
          accepted = False
       else:
-         print(f"New model win rate {winRateVsPrev:.1%} >= threshold {cfg.championThreshold:.1%} — accepting new champion")
+         print(f"League win rate {leagueWinRate:.1%} ({detail}) >= threshold "
+               f"{cfg.championThreshold:.1%} — accepting new champion")
 
    genEntry = {
       "generationIndex":   gen,
@@ -362,12 +408,16 @@ def runGeneration (cfg: Config, gen: int, prevModel: str) -> tuple[str, dict]:
       "temperature":       temp,
       "learningRate":      lr,
       "winRateVsPrev":     winRateVsPrev,
+      "leagueWinRate":     leagueWinRate,
+      "leagueOpponents":   [m["opponent"] for m in leagueMatches],
       "championAccepted":  accepted,
       "generate":          generateReport,
       "train":             trainReport,
       "evalVsRandom":      evalRandomReport,
       "evalVsHeuristic":   evalHeuristicReport,
-      "evalVsPrev":        evalPrevReport,
+      "evalVsPrev":        leagueMatches[-1]["report"],
+      "evalVsLeague":      [{"opponent": m["opponent"], "winRate": m["winRate"],
+                             "report": m["report"]} for m in leagueMatches[:-1]],
    }
 
    nextChampion = currentModel if accepted else prevModel
@@ -443,6 +493,8 @@ def configFromArgs (args: dict) -> Config:
       cPuct               = float(args["--c-puct"]),
       dirichletAlpha      = float(args["--dirichlet-alpha"]),
       dirichletEpsilon    = float(args["--dirichlet-epsilon"]),
+      valueDiscount       = float(args["--value-discount"]),
+      leagueSize          = int(args["--league-size"]),
       evalMonteCarloSamples = int(args["--eval-monte-carlo-samples"]),
       evalDeterminizations  = int(args["--eval-determinizations"]),
       evalMctsLeafBatch     = int(args["--eval-mcts-leaf-batch"]),
@@ -489,23 +541,28 @@ def main ():
    writeJsonAtomic(masterFile(cfg), master)
 
    # Pick the entry path: model start (gen 1 generates) or data start (gen 1 trains).
+   # championHistory is the accepted-champion lineage (oldest → newest); the
+   # league gate samples its panel from this list.
    if cfg.initialModel is not None:
-      currentModel = cfg.initialModel
+      championHistory = [cfg.initialModel]
       startGen = 1
    else:
-      currentModel, genEntry = runFirstGenerationFromData(cfg, cfg.initialData)
+      firstModel, genEntry = runFirstGenerationFromData(cfg, cfg.initialData)
+      championHistory = [firstModel]
       master["generations"].append(genEntry)
       master["completedAt"] = datetime.datetime.now().isoformat(timespec="seconds")
       writeJsonAtomic(masterFile(cfg), master)
       startGen = 2
 
    for gen in range(startGen, cfg.maxGenerations + 1):
-      currentModel, genEntry = runGeneration(cfg, gen, currentModel)
+      nextChampion, genEntry = runGeneration(cfg, gen, championHistory)
+      if genEntry["championAccepted"]:
+         championHistory.append(nextChampion)
       master["generations"].append(genEntry)
       master["completedAt"] = datetime.datetime.now().isoformat(timespec="seconds")
       writeJsonAtomic(masterFile(cfg), master)
 
-   print(f"\n=== Training complete! Final model: {currentModel} ===")
+   print(f"\n=== Training complete! Final model: {championHistory[-1]} ===")
    print(f"Run report: {masterFile(cfg)}")
 
 
