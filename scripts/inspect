@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Inspect Orion artifacts: run logs, training datasets, and saved models.
+
+Usage:
+   inspect.py TARGET [options]              auto-detect TARGET type
+   inspect.py run   RUN_DIR_OR_JSON [options]
+   inspect.py data  DATAFILE [options]
+   inspect.py model MODEL_DIR [options]
+
+Auto-detection:
+   directory containing run.json          → run dashboard
+   .json file with a "generations" key    → run dashboard
+   .bin.lz4 / .bin file                   → dataset report
+   directory containing architecture.json → model report
+
+Options:
+   --gens A:B     Run dashboard: restrict to generation range (inclusive)
+   --sample N     Dataset: analyze first N examples (default 20000; 0 = all)
+   --no-color     Plain output, no ANSI (auto when piped or NO_COLOR is set)
+   -h, --help     Show this message
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from inspectlib import common, runview, dataview, modelview
+
+
+# ── Target detection ───────────────────────────────────────────────────────────
+
+def detectMode (target: str) -> str:
+   if os.path.isdir(target):
+      if os.path.exists(os.path.join(target, "run.json")):
+         return "run"
+      if os.path.exists(os.path.join(target, "architecture.json")):
+         return "model"
+      raise SystemExit(f"Cannot detect type of directory {target}: "
+                       "no run.json or architecture.json inside. "
+                       "Use an explicit subcommand (run/data/model).")
+   if target.endswith((".bin.lz4", ".bin")):
+      return "data"
+   if target.endswith(".json"):
+      try:
+         if "generations" in json.load(open(target)):
+            return "run"
+      except Exception:
+         pass
+      raise SystemExit(f"{target} is JSON but not a run.json (no 'generations' key).")
+   raise SystemExit(f"Cannot detect type of {target}. "
+                    "Use an explicit subcommand (run/data/model).")
+
+
+# ── Argument parsing (kept manual: three flags, one positional, optional mode) ─
+
+def parseArgs (argv: list) -> dict:
+   args = {"mode": None, "target": None, "gens": None,
+           "sample": dataview.DEFAULT_SAMPLE, "noColor": False}
+   i = 0
+   while i < len(argv):
+      tok = argv[i]
+      if tok in ("-h", "--help"):
+         print(__doc__.strip()); raise SystemExit(0)
+      elif tok == "--no-color":
+         args["noColor"] = True
+      elif tok == "--gens":
+         i += 1
+         lo, _, hi = argv[i].partition(":")
+         args["gens"] = (int(lo or 0), int(hi or 10**9))
+      elif tok == "--sample":
+         i += 1
+         args["sample"] = int(argv[i])
+      elif args["mode"] is None and tok in ("run", "data", "model") and args["target"] is None:
+         args["mode"] = tok
+      elif args["target"] is None:
+         args["target"] = tok
+      else:
+         raise SystemExit(f"Unexpected argument: {tok}")
+      i += 1
+   if args["target"] is None:
+      print(__doc__.strip()); raise SystemExit(1)
+   return args
+
+
+# ── Dispatch ───────────────────────────────────────────────────────────────────
+
+def main ():
+   args = parseArgs(sys.argv[1:])
+   mode = args["mode"] or detectMode(args["target"])
+   palette = common.Palette(common.colorEnabled(args["noColor"]))
+
+   if mode == "run":
+      target = args["target"]
+      if os.path.isdir(target):
+         target = os.path.join(target, "run.json")
+      runview.render(json.load(open(target)), palette, genRange=args["gens"])
+   elif mode == "data":
+      dataview.render(args["target"], palette, sampleLimit=args["sample"])
+   elif mode == "model":
+      modelview.render(args["target"], palette)
+
+
+if __name__ == "__main__":
+   main()
