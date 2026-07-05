@@ -37,7 +37,7 @@ public final class MCTSNode {
 
    public init () {}
 
-   var isExpanded: Bool { !priors.isEmpty }
+   public var isExpanded: Bool { !priors.isEmpty }
 
    /// The child node reached by `action`, or nil if this node is unexpanded
    /// or the action was never visited. Used for subtree reuse between moves.
@@ -215,6 +215,65 @@ public struct MCTSSearch {
       result.leafNode.pendingEvaluation = false
       expandLeaf(node: result.leafNode, logits: logits, legalMask: result.leafGame.legalMoveMaskForCurrentPlayer())
       backpropagate(result: result, leafValue: value)
+   }
+
+   /// Mix symmetric Dirichlet(alpha) noise into an expanded node's priors over
+   /// its legal actions: P'(a) = (1-eps)*P(a) + eps*eta(a), eta ~ Dir(alpha).
+   /// Applied once to the ROOT during self-play data generation to force the
+   /// search to explore moves the network currently underrates. No-op on an
+   /// unexpanded node, when eps <= 0, or with fewer than two legal moves.
+   /// Not used during evaluation — competitive play must not inject noise.
+   public func applyDirichletNoise<G: RandomNumberGenerator> (
+      root: MCTSNode, alpha: Float, epsilon: Float, rng: inout G) {
+      guard epsilon > 0, root.isExpanded else { return }
+      let legal = root.priors.indices.filter { root.priors[$0] > 0 }
+      guard legal.count > 1 else { return }
+
+      // Symmetric Dirichlet sample = normalized independent Gamma(alpha, 1) draws.
+      var gammas = [Float](repeating: 0, count: legal.count)
+      var sum: Float = 0
+      for k in 0..<legal.count {
+         let g = Self.sampleGamma(shape: alpha, rng: &rng)
+         gammas[k] = g
+         sum += g
+      }
+      guard sum > 0 else { return }
+      for (k, action) in legal.enumerated() {
+         let eta = gammas[k] / sum
+         root.priors[action] = (1 - epsilon) * root.priors[action] + epsilon * eta
+      }
+   }
+
+   /// A uniform in (0, 1] — strictly positive so callers can take log/pow safely.
+   private static func openUnitUniform<G: RandomNumberGenerator> (rng: inout G) -> Float {
+      max(Float.leastNormalMagnitude, Float.random(in: 0 ..< 1, using: &rng))
+   }
+
+   /// Standard normal via Box-Muller.
+   private static func sampleStandardNormal<G: RandomNumberGenerator> (rng: inout G) -> Float {
+      let u1 = openUnitUniform(rng: &rng)
+      let u2 = Float.random(in: 0 ..< 1, using: &rng)
+      return sqrt(-2 * log(u1)) * cos(2 * Float.pi * u2)
+   }
+
+   /// Sample from Gamma(shape, scale = 1) via Marsaglia-Tsang, with the standard
+   /// boosting trick for shape < 1 (our Dirichlet alpha is typically < 1).
+   private static func sampleGamma<G: RandomNumberGenerator> (shape: Float, rng: inout G) -> Float {
+      if shape < 1 {
+         let u = openUnitUniform(rng: &rng)
+         return sampleGamma(shape: shape + 1, rng: &rng) * pow(u, 1 / shape)
+      }
+      let d = shape - 1.0 / 3.0
+      let c = 1.0 / (3.0 * sqrt(d))
+      while true {
+         let x = sampleStandardNormal(rng: &rng)
+         let v0 = 1 + c * x
+         if v0 <= 0 { continue }
+         let v = v0 * v0 * v0
+         let u = openUnitUniform(rng: &rng)
+         if u < 1 - 0.0331 * (x * x) * (x * x) { return d * v }
+         if log(u) < 0.5 * x * x + d * (1 - v + log(v)) { return d * v }
+      }
    }
 
    /// Evaluate multiple leaf game states via batched agent prediction.

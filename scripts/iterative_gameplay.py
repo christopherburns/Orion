@@ -28,9 +28,11 @@ Options:
    --generate-batch-size N       Games to run in parallel during MCTS generation            [default: 128]
    --initial-temp TEMP           Sampling temperature for generation 1                      [default: 1.5]
    --final-temp TEMP             Sampling temperature for the last generation               [default: 0.5]
-   --monte-carlo-samples N       MCTS samples per move for data generation (0=disabled)     [default: 25]
+   --monte-carlo-samples N       MCTS samples per move for data generation (0=disabled)     [default: 800]
    --mcts-leaf-batch N           Leaves per MCTS round via virtual loss (generation)        [default: 8]
    --c-puct N                    MCTS exploration constant (generation)                     [default: 1.5]
+   --dirichlet-alpha N           Dirichlet noise concentration (root exploration)           [default: 0.3]
+   --dirichlet-epsilon N         Root-prior weight on Dirichlet noise (0 = disable)         [default: 0.25]
   Training:
    --epochs N                    Training epochs per generation                             [default: 100]
    --training-batch-size N       Training batch size                                        [default: 256]
@@ -97,6 +99,8 @@ class Config:
    monteCarloSamples:   int
    mctsLeafBatch:       int
    cPuct:               float
+   dirichletAlpha:      float
+   dirichletEpsilon:    float
    evalMonteCarloSamples: int
    evalDeterminizations:  int
    evalMctsLeafBatch:     int
@@ -165,6 +169,8 @@ def generateData (cfg: Config, outputPath: str, agent: str, temperature: float, 
       args += ["--monte-carlo-samples", str(cfg.monteCarloSamples),
                "--mcts-leaf-batch", str(cfg.mctsLeafBatch),
                "--c-puct", str(cfg.cPuct),
+               "--dirichlet-alpha", str(cfg.dirichletAlpha),
+               "--dirichlet-epsilon", str(cfg.dirichletEpsilon),
                "-b", str(cfg.generateBatchSize)]
    return runOrion(args, "generate", reportPath)
 
@@ -435,6 +441,8 @@ def configFromArgs (args: dict) -> Config:
       monteCarloSamples   = int(args["--monte-carlo-samples"]),
       mctsLeafBatch       = int(args["--mcts-leaf-batch"]),
       cPuct               = float(args["--c-puct"]),
+      dirichletAlpha      = float(args["--dirichlet-alpha"]),
+      dirichletEpsilon    = float(args["--dirichlet-epsilon"]),
       evalMonteCarloSamples = int(args["--eval-monte-carlo-samples"]),
       evalDeterminizations  = int(args["--eval-determinizations"]),
       evalMctsLeafBatch     = int(args["--eval-mcts-leaf-batch"]),

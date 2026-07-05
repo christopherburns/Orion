@@ -172,6 +172,9 @@ private struct GameLane {
    var moves: [(playerIndex: Int, moveIndex: Int)]
    var gameIndex: Int
    var active: Bool
+   // Whether Dirichlet root noise has been applied to mctsRoot for the current
+   // move yet. Reset each time a new root is set (new move / new game).
+   var rootNoiseApplied: Bool
    // Turn count is not tracked here — game.currentTurn is authoritative and
    // counts player turns correctly (a discard sub-move does not advance it).
 }
@@ -197,6 +200,8 @@ public struct DataGenerator {
       opts.addOption("Data Generator", "", "monte-carlo-samples", "MCTS simulations per move (default: 1, minimum: 1)")
       opts.addOption("Data Generator", "", "mcts-leaf-batch", "Leaves selected per MCTS round per game via virtual loss (default: 8, 1 = classic one-at-a-time)")
       opts.addOption("Data Generator", "", "c-puct", "MCTS exploration constant (default: 1.5)")
+      opts.addOption("Data Generator", "", "dirichlet-alpha", "Symmetric Dirichlet concentration for root exploration noise (default: 0.3)")
+      opts.addOption("Data Generator", "", "dirichlet-epsilon", "Root-prior weight given to Dirichlet noise during self-play (default: 0.25, 0 = disable)")
       opts.addOption("Data Generator", "b", "batch-size", "Number of games per batch / parallel lanes (default: 128)")
       opts.addOption("Data Generator", "", "mcts-debug", "Print MCTS search tree and π after every move (very verbose, for debugging)", requireArgument: false)
       opts.addOption("Data Generator", "", "serial", "Force single-threaded generation (default: concurrent)", requireArgument: false)
@@ -228,6 +233,8 @@ public struct DataGenerator {
          let monteCarloSamples: Int
          let mctsLeafBatch: Int
          let cPuct: Float
+         let dirichletAlpha: Float
+         let dirichletEpsilon: Float
          let batchSize: Int
          let output: String
       }
@@ -271,6 +278,8 @@ public struct DataGenerator {
       baseSeed: UInt64,
       laneCount: Int,
       mctsLeafBatch: Int,
+      dirichletAlpha: Float,
+      dirichletEpsilon: Float,
       baseGameIndex: Int = 0) -> (games: [GameData], statistics: MoveStatistics) {
 
       let actualLanes = min(laneCount, gameCount)
@@ -289,7 +298,8 @@ public struct DataGenerator {
             examples: [],
             moves: [],
             gameIndex: globalIndex,
-            active: true)
+            active: true,
+            rootNoiseApplied: false)
       }
 
       func finalizeGame (_ lane: GameLane) -> GameData? {
@@ -326,6 +336,22 @@ public struct DataGenerator {
          let leafBatch = max(1, mctsLeafBatch)
          let roundCount = (mctsSearch.monteCarloSamples + leafBatch - 1) / leafBatch
          for _ in 0..<roundCount {
+            // Apply Dirichlet root noise once per move, as soon as the root is
+            // expanded and before any PUCT descent uses its priors. A reused
+            // (already-expanded) root is noised at the top of round 1; a fresh
+            // root is expanded during round 1's eval and noised atop round 2
+            // (round 1 only selected the root itself as a leaf — no prior use).
+            if dirichletEpsilon > 0 {
+               for i in lanes.indices where lanes[i].active {
+                  if !lanes[i].rootNoiseApplied && lanes[i].mctsRoot.isExpanded {
+                     mctsSearch.applyDirichletNoise(
+                        root: lanes[i].mctsRoot, alpha: dirichletAlpha,
+                        epsilon: dirichletEpsilon, rng: &lanes[i].rng)
+                     lanes[i].rootNoiseApplied = true
+                  }
+               }
+            }
+
             var pending: [(laneIdx: Int, result: SelectionResult)] = []
 
             for i in lanes.indices {
@@ -381,6 +407,7 @@ public struct DataGenerator {
             // rebuilding the tree from nothing. Falls back to a fresh node when the
             // child was never expanded (e.g. move sampled from the prior fallback).
             lanes[i].mctsRoot = lanes[i].mctsRoot.child(action: moveIndex) ?? MCTSNode()
+            lanes[i].rootNoiseApplied = false
 
             // Check if game is complete
             if case .inProgress = lanes[i].game.terminalCondition { } else {
@@ -426,6 +453,8 @@ public struct DataGenerator {
       monteCarloSamples: Int = 1,
       mctsLeafBatch: Int = 8,
       cPuct: Float = 1.5,
+      dirichletAlpha: Float = 0.3,
+      dirichletEpsilon: Float = 0.25,
       mctsDebug: Bool = false,
       batchSize: Int = 128,
       serial: Bool = false,
@@ -443,6 +472,7 @@ public struct DataGenerator {
       print("  Max turns:        \(maxTurns)")
       print("  Seed:             \(seed)")
       print("  MCTS sims/move:   \(monteCarloSamples)  (c_puct=\(cPuct), leaf batch=\(mctsLeafBatch))")
+      print("  Dirichlet noise:  \(dirichletEpsilon > 0 ? "alpha=\(dirichletAlpha), epsilon=\(dirichletEpsilon)" : "disabled")")
       print("  Batch size:       \(batchSize)")
       print("  Tasks:            \(taskCount)\(serial ? " (serial)" : " (concurrent)")")
       print("  Output:           \(outputPath)")
@@ -480,6 +510,8 @@ public struct DataGenerator {
                baseSeed: taskBaseSeed,
                laneCount: taskGameCount,
                mctsLeafBatch: mctsLeafBatch,
+               dirichletAlpha: dirichletAlpha,
+               dirichletEpsilon: dirichletEpsilon,
                baseGameIndex: taskOffset)
 
             taskResults[taskIndex] = result
@@ -572,6 +604,8 @@ public struct DataGenerator {
       let monteCarloSamples = opts.get(option: "monte-carlo-samples", orElse: 1)
       let mctsLeafBatch = opts.get(option: "mcts-leaf-batch", orElse: 8)
       let cPuct = opts.get(option: "c-puct", orElse: Float(1.5))
+      let dirichletAlpha = opts.get(option: "dirichlet-alpha", orElse: Float(0.3))
+      let dirichletEpsilon = opts.get(option: "dirichlet-epsilon", orElse: Float(0.25))
       let mctsDebug = opts.wasProvided(option: "mcts-debug")
       let batchSize = opts.get(option: "batch-size", orElse: 128)
       let serial = opts.wasProvided(option: "serial")
@@ -591,6 +625,8 @@ public struct DataGenerator {
          monteCarloSamples: monteCarloSamples,
          mctsLeafBatch: mctsLeafBatch,
          cPuct: cPuct,
+         dirichletAlpha: dirichletAlpha,
+         dirichletEpsilon: dirichletEpsilon,
          mctsDebug: mctsDebug,
          batchSize: batchSize,
          serial: serial,
@@ -617,6 +653,8 @@ public struct DataGenerator {
                monteCarloSamples: monteCarloSamples,
                mctsLeafBatch:     mctsLeafBatch,
                cPuct:             cPuct,
+               dirichletAlpha:    dirichletAlpha,
+               dirichletEpsilon:  dirichletEpsilon,
                batchSize:         batchSize,
                output:            outputPath),
             results: GenerateReport.Results(
