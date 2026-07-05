@@ -202,6 +202,15 @@ public struct DataGenerator {
       opts.addOption("Data Generator", "", "c-puct", "MCTS exploration constant (default: 1.5)")
       opts.addOption("Data Generator", "", "dirichlet-alpha", "Symmetric Dirichlet concentration for root exploration noise (default: 0.3)")
       opts.addOption("Data Generator", "", "dirichlet-epsilon", "Root-prior weight given to Dirichlet noise during self-play (default: 0.25, 0 = disable)")
+      opts.addOption("Data Generator", "", "value-discount", "Per-turn discount on value targets: value = outcome × γ^(turns remaining) (default: 1.0 = off)",
+         longDoc:
+            "Splendor is a race — winning in 30 turns must be worth more than " +
+            "winning in 90, but a raw ±1 outcome target treats them equally, " +
+            "so nothing in training ever prefers the faster win. With γ < 1, " +
+            "each example's value target becomes outcome × γ^(finalTurn − " +
+            "exampleTurn): positions closer to a win train toward stronger " +
+            "values, and between two winning lines the shorter one scores " +
+            "higher. Typical useful range 0.98–0.995.")
       opts.addOption("Data Generator", "b", "batch-size", "Number of games per batch / parallel lanes (default: 128)")
       opts.addOption("Data Generator", "", "mcts-debug", "Print MCTS search tree and π after every move (very verbose, for debugging)", requireArgument: false)
       opts.addOption("Data Generator", "", "serial", "Force single-threaded generation (default: concurrent)", requireArgument: false)
@@ -222,6 +231,9 @@ public struct DataGenerator {
       let results: Results
 
       struct Parameters: Encodable {
+         // Encoding era of the binary that generated this data; the version
+         // gate guarantees any loaded model matches it.
+         let architectureVersion: Int
          let agent: String
          let agentKind: String
          let agentLabel: String
@@ -235,6 +247,7 @@ public struct DataGenerator {
          let cPuct: Float
          let dirichletAlpha: Float
          let dirichletEpsilon: Float
+         let valueDiscount: Float
          let batchSize: Int
          let output: String
       }
@@ -280,6 +293,7 @@ public struct DataGenerator {
       mctsLeafBatch: Int,
       dirichletAlpha: Float,
       dirichletEpsilon: Float,
+      valueDiscount: Float,
       baseGameIndex: Int = 0) -> (games: [GameData], statistics: MoveStatistics) {
 
       let actualLanes = min(laneCount, gameCount)
@@ -307,10 +321,17 @@ public struct DataGenerator {
          if case .playerWon(let idx) = lane.game.terminalCondition { winner = idx }
          else { winner = nil }
 
+         let finalTurn = lane.game.currentTurn
          let examplesWithValues = lane.examples.map { ex in
-            let value: Float
+            var value: Float
             if let w = winner { value = (ex.playerIndex == w) ? 1.0 : -1.0 }
             else { value = 0.0 }
+            // Length discount: positions closer to the end train toward
+            // stronger values, so between two winning lines the search
+            // prefers the shorter one. γ = 1 leaves classic ±1 targets.
+            if valueDiscount < 1.0 && value != 0.0 {
+               value *= pow(valueDiscount, Float(finalTurn - ex.turnNumber))
+            }
             return TrainingExample(
                turnNumber: ex.turnNumber, playerIndex: ex.playerIndex,
                state: ex.state, policy: ex.policy, value: value)
@@ -455,6 +476,7 @@ public struct DataGenerator {
       cPuct: Float = 1.5,
       dirichletAlpha: Float = 0.3,
       dirichletEpsilon: Float = 0.25,
+      valueDiscount: Float = 1.0,
       mctsDebug: Bool = false,
       batchSize: Int = 128,
       serial: Bool = false,
@@ -473,6 +495,7 @@ public struct DataGenerator {
       print("  Seed:             \(seed)")
       print("  MCTS sims/move:   \(monteCarloSamples)  (c_puct=\(cPuct), leaf batch=\(mctsLeafBatch))")
       print("  Dirichlet noise:  \(dirichletEpsilon > 0 ? "alpha=\(dirichletAlpha), epsilon=\(dirichletEpsilon)" : "disabled")")
+      print("  Value discount:   \(valueDiscount < 1.0 ? "γ=\(valueDiscount) per remaining turn" : "off (raw ±1 outcomes)")")
       print("  Batch size:       \(batchSize)")
       print("  Tasks:            \(taskCount)\(serial ? " (serial)" : " (concurrent)")")
       print("  Output:           \(outputPath)")
@@ -512,6 +535,7 @@ public struct DataGenerator {
                mctsLeafBatch: mctsLeafBatch,
                dirichletAlpha: dirichletAlpha,
                dirichletEpsilon: dirichletEpsilon,
+               valueDiscount: valueDiscount,
                baseGameIndex: taskOffset)
 
             taskResults[taskIndex] = result
@@ -606,6 +630,7 @@ public struct DataGenerator {
       let cPuct = opts.get(option: "c-puct", orElse: Float(1.5))
       let dirichletAlpha = opts.get(option: "dirichlet-alpha", orElse: Float(0.3))
       let dirichletEpsilon = opts.get(option: "dirichlet-epsilon", orElse: Float(0.25))
+      let valueDiscount = opts.get(option: "value-discount", orElse: Float(1.0))
       let mctsDebug = opts.wasProvided(option: "mcts-debug")
       let batchSize = opts.get(option: "batch-size", orElse: 128)
       let serial = opts.wasProvided(option: "serial")
@@ -627,6 +652,7 @@ public struct DataGenerator {
          cPuct: cPuct,
          dirichletAlpha: dirichletAlpha,
          dirichletEpsilon: dirichletEpsilon,
+         valueDiscount: valueDiscount,
          mctsDebug: mctsDebug,
          batchSize: batchSize,
          serial: serial,
@@ -642,6 +668,7 @@ public struct DataGenerator {
             completedAt:    Report.timestamp(endDate),
             elapsedSeconds: endDate.timeIntervalSince(startDate),
             parameters: GenerateReport.Parameters(
+               architectureVersion: PolicyValueNetwork.ARCHITECTURE_VERSION,
                agent:             agentSpec,
                agentKind:         Report.agentKind(spec: agentSpec),
                agentLabel:        Report.agentLabel(spec: agentSpec),
@@ -655,6 +682,7 @@ public struct DataGenerator {
                cPuct:             cPuct,
                dirichletAlpha:    dirichletAlpha,
                dirichletEpsilon:  dirichletEpsilon,
+               valueDiscount:     valueDiscount,
                batchSize:         batchSize,
                output:            outputPath),
             results: GenerateReport.Results(
