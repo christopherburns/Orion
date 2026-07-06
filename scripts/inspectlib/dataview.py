@@ -147,10 +147,25 @@ def _policySection (examples, policyDim, p):
             f"{amFrac*100:7.1f}%  {C.bar(amFrac/maxFrac, 12)}")
 
 
+# Per-player encoded-float count, by total state dimension. Layout offsets
+# below are derived from this rather than hardcoded, so both encoding eras
+# report correctly instead of one silently reading the other's layout.
+#   arch v8 (496 total): 50 floats/player (no gem-headroom feature)
+#   arch v9 (500 total): 51 floats/player (+1 gem headroom)
+PLAYER_ENCODING_SIZE_BY_STATE_DIM = {496: 50, 500: 51}
+
+
 def _stateSection (examples, stateDim, p):
-   if stateDim < 496:
-      return  # unknown encoding layout, skip feature spot-checks
-   turnFeats = [st[495] for st, _, _ in examples]
+   playerSize = PLAYER_ENCODING_SIZE_BY_STATE_DIM.get(stateDim)
+   if playerSize is None:
+      return  # unrecognized encoding layout, skip feature spot-checks
+
+   # Layout: 4 player blocks, then supply(5)+gold(1), yields(15), nobles(130),
+   # cards(144), then the turn feature as the final float.
+   cardsStart = 4 * playerSize + 5 + 1 + 15 + 130
+   turnIdx = stateDim - 1
+
+   turnFeats = [st[turnIdx] for st, _, _ in examples]
    turnFeats.sort()
    n = len(turnFeats)
 
@@ -159,12 +174,12 @@ def _stateSection (examples, stateDim, p):
       t = 0.5 * math.log((1 + f) / (1 - f)) * 100  # atanh × 100
       return min(t, 100)
 
-   # Affordability flags: visible cards at 351..494, 12 floats each, flag last
-   affordable = [sum(1 for k in range(12) if st[351 + 12 * k + 11] > 0.5)
+   # Affordability flags: visible cards, 12 floats each, flag last
+   affordable = [sum(1 for k in range(12) if st[cardsStart + 12 * k + 11] > 0.5)
                  for st, _, _ in examples]
    print()
    print(C.sectionRule("state features (spot checks)"))
-   print(f"  turn feature (495): min {turnFeats[0]:.2f} · median {turnFeats[n//2]:.2f} · "
+   print(f"  turn feature ({turnIdx}): min {turnFeats[0]:.2f} · median {turnFeats[n//2]:.2f} · "
          f"max {turnFeats[-1]:.2f}   (≈ turns {decodeTurn(turnFeats[0]):.0f}–{decodeTurn(turnFeats[-1]):.0f})")
    print(f"  affordable visible cards/state: mean {sum(affordable)/n:.1f} of 12")
 

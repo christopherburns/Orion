@@ -97,8 +97,8 @@ public struct PlayerState {
    }
 
    // Encode player state as a fixed-size array of Float16
-   // Size: 5 (gems) + 1 (goldGems) + 5 (card color counts) + 1 (reserved card count) + 36 (3 reserved cards × 12) + 1 (noble count) + 1 (score) = 50
-   public static let ENCODED_SIZE = 50
+   // Size: 5 (gems) + 1 (goldGems) + 1 (gem headroom) + 5 (card color counts) + 1 (reserved card count) + 36 (3 reserved cards × 12) + 1 (noble count) + 1 (score) = 51
+   public static let ENCODED_SIZE = 51
 
    public func encoding () -> [Float16] {
       var encoded: [Float16] = []
@@ -107,6 +107,11 @@ public struct PlayerState {
       // 5 gem counts (one per GemType), and a count of gold gems
       encoded.append(contentsOf: self.gems.map { Float16($0) / 10.0 })
       encoded.append(Float16(self.goldGems) / 10.0)
+
+      // Gem headroom - how many more gems until the player will face a discard penalty
+      // This surfaces a meaningful correlate to bad performance that would otherwise need
+      // to be inferred from the sum of six other properties
+      encoded.append(Float16(10.0 - Float(self.gemCount)) / 10.0)
 
       // Record the number of cards owned of each color - this is 5 more values
       encoded.append(contentsOf: self.cardPower.map { Float16($0) / 7.0 })
@@ -527,14 +532,14 @@ public struct Game: GameProtocol {
    }
 
    // Encode game state as a fixed-size array of Float16
-   // Size: 200 (4 players × 50) +
+   // Size: 204 (4 players × 51, incl. gem headroom) +
    //         5 (supply gem counts) +
    //         1 (gold supply gem count) +
    //        15 (10 take-three yields + 5 take-two yields) +
    //       130 (5 nobles × 26: 1 point + 5 price + 4 players × 5 per-color deficits) +
    //       144 (3 tiers × 4 cards × 12) +
-   //         1 (turn) = 496
-   public static let GAME_STATE_ENCODING_SIZE = 496
+   //         1 (turn) = 500
+   public static let GAME_STATE_ENCODING_SIZE = 500
 
    public func encoding () -> [Float16] {
       var encoded: [Float16] = []

@@ -184,13 +184,18 @@ def _moveMix (gens, p):
          row += f"{n / total * 100:7.1f}%"
       print(row)
 
-   # Winner-vs-loser tier-3 signal from the newest generation
+   # Winner-vs-loser tier-3 signal from the newest generation. Only quote a
+   # ratio when the loser count is large enough for it to mean anything —
+   # early generations often have single-digit loser tier-3 buys.
    _, msLast = withStats[-1]
    t3 = msLast["byMoveType"].get("purchaseTier3", {})
    w, l = t3.get("winner", 0), t3.get("loser", 0)
-   if l > 0 and w / l >= 1.5:
+   if l >= 20 and w / l >= 1.5:
       print(f"  winners buy {w / l:.1f}× more tier-3 than losers "
             f"(latest gen: {w} vs {l})")
+   elif w >= 20 and l < 20:
+      print(f"  tier-3 buys occur almost only in winning games "
+            f"(latest gen: winners {w}, losers {l})")
 
 
 def _generationsTable (gens, s, p):

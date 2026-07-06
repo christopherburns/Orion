@@ -68,6 +68,8 @@ public struct GameplayTester {
       }
 
       struct Parameters: Encodable {
+         // Encoding era of the binary; any loaded neural agent matches it.
+         let architectureVersion: Int
          let agents: [AgentSpec]
          let gameCount: Int
          let playerCount: Int
@@ -808,6 +810,7 @@ public struct GameplayTester {
             completedAt:    Report.timestamp(endDate),
             elapsedSeconds: endDate.timeIntervalSince(startDate),
             parameters: PlayReport.Parameters(
+               architectureVersion: PolicyValueNetwork.ARCHITECTURE_VERSION,
                agents:            agentSpecsForReport,
                gameCount:         gameCount,
                playerCount:       playerCount,
