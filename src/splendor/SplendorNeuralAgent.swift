@@ -28,15 +28,47 @@ public struct ModelMetadata: Codable {
    }
 }
 
-/// Neural network for Splendor game playing
-/// Architecture:
-///   Input (361) -> Dense(512) -> Dense(512) -> Dense(256) -> Policy Head (48) + Value Head (1)
+/// Neural network for Splendor game playing — architecture v10.
+///
+/// v10 replaces the flat MLP's positional reading of the 12 visible-card
+/// blocks with a SHARED CARD ENCODER: one small MLP (12 → 32 → 32) applied
+/// with the same weights to every visible card slot (equivalently, a 1×1
+/// convolution over the card axis / the Deep Sets construction). Its outputs
+/// feed two consumers:
+///
+///  · pooled (mean over the 12 embeddings) into the trunk as an
+///    order-invariant board summary — the value head's view of the market;
+///  · un-pooled through a shared per-card readout (32 → 1) producing each
+///    card's PURCHASE logit directly. Canonical purchase moves 0..<12 and the
+///    encoding's card blocks share the same 4*tier+position ordering, so
+///    concatenating [per-card logits, trunk logits] IS the correct scatter.
+///
+/// The remaining 36 moves (purchase-reserved, takes, reserves, discards) come
+/// off the trunk as before. Reserved-card routing, role flags, and the e⊕h
+/// context-concat are deliberately deferred — this is the minimal cut that
+/// tests whether shared card reading sharpens purchase play.
 public class PolicyValueNetwork: Module {
 
-   public static let INPUT_DIMENSIONS = 500 // Matches game's state embedding size
-   public static let POLICY_DIMENSIONS = 48 // Matches game's move space (42 normal + 6 discard)
+   public static let INPUT_DIMENSIONS = Game.GAME_STATE_ENCODING_SIZE  // 500
+   public static let POLICY_DIMENSIONS = Game.CANONICAL_MOVE_COUNT     // 48
    public static let HIDDEN_DIMENSIONS = 512
+   public static let CARD_EMBED_DIMENSIONS = 32
    public static let DEFAULT_DROPOUT: Float = 0.1
+
+   // Encoding-layout facts the forward pass depends on, derived from the same
+   // constants Game.encoding() uses so they cannot silently drift apart.
+   // Card block start = 4 players × PlayerState.ENCODED_SIZE, then supply(5),
+   // gold(1), take-N yields(15), nobles(130).
+   static let VISIBLE_CARD_COUNT = 12                        // 3 tiers × 4 positions
+   static let CARD_FEATURES = Card.ENCODED_SIZE              // 12 floats per card
+   static let CARD_BLOCK_START = 4 * PlayerState.ENCODED_SIZE + 5 + 1 + 15 + 130           // 355
+   static let CARD_BLOCK_END = CARD_BLOCK_START + VISIBLE_CARD_COUNT * CARD_FEATURES       // 499
+   static let NON_CARD_DIMENSIONS = INPUT_DIMENSIONS - VISIBLE_CARD_COUNT * CARD_FEATURES  // 356
+   static let TRUNK_INPUT_DIMENSIONS = NON_CARD_DIMENSIONS + CARD_EMBED_DIMENSIONS         // 388
+
+   // Canonical move layout: purchase-visible moves are exactly indices 0..<12.
+   static let PURCHASE_MOVE_COUNT = 12
+   static let TRUNK_MOVE_COUNT = POLICY_DIMENSIONS - PURCHASE_MOVE_COUNT  // 36 (moves 12..<48)
 
    /// Default precision for parameters and forward pass when no override is given.
    /// bfloat16 unlocks the M-series matrix-multiply hardware for large GEMMs
@@ -49,12 +81,16 @@ public class PolicyValueNetwork: Module {
    public let precision: DType
 
    // Current architecture version - increment when architecture changes
-   public static let ARCHITECTURE_VERSION = 9
+   public static let ARCHITECTURE_VERSION = 10
+
+   // Shared card encoder (same weights applied to each visible-card slot)
+   let cardEncoder1: Linear     // 12 → 32
+   let cardEncoder2: Linear     // 32 → 32
 
    // Shared trunk layers
-   let dense1: Linear
-   let dense2: Linear
-   let dense3: Linear
+   let dense1: Linear           // 388 → 512
+   let dense2: Linear           // 512 → 512
+   let dense3: Linear           // 512 → 512
 
    // Dropout for regularization
    let dropout1: Dropout
@@ -64,12 +100,13 @@ public class PolicyValueNetwork: Module {
    /// The dropout rate used by this network instance (stored for serialization)
    public let dropoutRate: Float
 
-   // Policy head (outputs move logits)
-   let policyHead: Linear
+   // Policy: shared per-card purchase readout + trunk head for the other moves
+   let policyCardReadout: Linear   // 32 → 1, same weights for every card slot
+   let policyTrunkHead: Linear     // 512 → 36 (canonical moves 12..<48)
 
    // Value head (outputs win probability)
-   let valueHidden: Linear
-   let valueOutput: Linear
+   let valueHidden: Linear      // 512 → 128
+   let valueOutput: Linear      // 128 → 1
 
    /// Initialize network with optional seed for deterministic weight initialization
    /// - Parameters:
@@ -80,69 +117,37 @@ public class PolicyValueNetwork: Module {
       self.dropoutRate = dropoutRate
       self.precision = precision
 
-      // Create deterministic key if seed provided
+      // Create deterministic keys if seed provided (one per weight matrix)
+      let layerCount = 9
       let keys: [MLXArray]
       if let seed = seed {
-         // Create base key and split into 6 keys (one for each layer)
          let baseKey = MLXRandom.key(seed)
-         keys = MLXRandom.split(key: baseKey, into: 6)
+         keys = MLXRandom.split(key: baseKey, into: layerCount)
       } else {
-         keys = Array(repeating: MLXArray(0), count: 6) // Dummy keys, will use nil
+         keys = Array(repeating: MLXArray(0), count: layerCount) // Dummy keys, will use nil
       }
 
-      // Shared trunk: 361 -> 512 -> 512 -> 512
-      self.dense1 = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.INPUT_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[0], precision: precision),
-         bias: MLXArray.zeros([PolicyValueNetwork.HIDDEN_DIMENSIONS]).asType(precision))
-      self.dense2 = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[1], precision: precision),
-         bias: MLXArray.zeros([PolicyValueNetwork.HIDDEN_DIMENSIONS]).asType(precision))
-      self.dense3 = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, key: seed == nil ? nil : keys[2], precision: precision),
-         bias: MLXArray.zeros([PolicyValueNetwork.HIDDEN_DIMENSIONS]).asType(precision))
+      func heLinear (_ keyIndex: Int, _ inDim: Int, _ outDim: Int) -> Linear {
+         Linear(weight: PolicyValueNetwork.heInitialization(
+                   inputDimensions: inDim, outputDimensions: outDim,
+                   key: seed == nil ? nil : keys[keyIndex], precision: precision),
+                bias: MLXArray.zeros([outDim]).asType(precision))
+      }
 
-      // Dropout layers
+      self.cardEncoder1     = heLinear(0, PolicyValueNetwork.CARD_FEATURES, PolicyValueNetwork.CARD_EMBED_DIMENSIONS)
+      self.cardEncoder2     = heLinear(1, PolicyValueNetwork.CARD_EMBED_DIMENSIONS, PolicyValueNetwork.CARD_EMBED_DIMENSIONS)
+      self.dense1           = heLinear(2, PolicyValueNetwork.TRUNK_INPUT_DIMENSIONS, PolicyValueNetwork.HIDDEN_DIMENSIONS)
+      self.dense2           = heLinear(3, PolicyValueNetwork.HIDDEN_DIMENSIONS, PolicyValueNetwork.HIDDEN_DIMENSIONS)
+      self.dense3           = heLinear(4, PolicyValueNetwork.HIDDEN_DIMENSIONS, PolicyValueNetwork.HIDDEN_DIMENSIONS)
+      self.policyCardReadout = heLinear(5, PolicyValueNetwork.CARD_EMBED_DIMENSIONS, 1)
+      self.policyTrunkHead  = heLinear(6, PolicyValueNetwork.HIDDEN_DIMENSIONS, PolicyValueNetwork.TRUNK_MOVE_COUNT)
+      self.valueHidden      = heLinear(7, PolicyValueNetwork.HIDDEN_DIMENSIONS, 128)
+      self.valueOutput      = heLinear(8, 128, 1)
+
       self.dropout1 = Dropout(p: dropoutRate)
       self.dropout2 = Dropout(p: dropoutRate)
       self.dropout3 = Dropout(p: dropoutRate)
 
-      // Policy head: 512 -> 48 logits
-      self.policyHead = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: PolicyValueNetwork.POLICY_DIMENSIONS, key: seed == nil ? nil : keys[3], precision: precision),
-         bias: MLXArray.zeros([PolicyValueNetwork.POLICY_DIMENSIONS]).asType(precision))
-
-      // Value head: 256 -> 128 -> 1
-      self.valueHidden = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: PolicyValueNetwork.HIDDEN_DIMENSIONS, outputDimensions: 128, key: seed == nil ? nil : keys[4], precision: precision),
-         bias: MLXArray.zeros([128]).asType(precision))
-      self.valueOutput = Linear(weight: PolicyValueNetwork.heInitialization(
-         inputDimensions: 128, outputDimensions: 1, key: seed == nil ? nil : keys[5], precision: precision),
-         bias: MLXArray.zeros([1]).asType(precision))
-
-      super.init()
-   }
-
-   /// Private initializer that takes weights directly (for cloning and loading)
-   private init (
-      dense1Weight: MLXArray, dense1Bias: MLXArray,
-      dense2Weight: MLXArray, dense2Bias: MLXArray,
-      dense3Weight: MLXArray, dense3Bias: MLXArray,
-      policyHeadWeight: MLXArray, policyHeadBias: MLXArray,
-      valueHiddenWeight: MLXArray, valueHiddenBias: MLXArray,
-      valueOutputWeight: MLXArray, valueOutputBias: MLXArray,
-      dropoutRate: Float = DEFAULT_DROPOUT,
-      precision: DType = DEFAULT_PRECISION) {
-      self.dropoutRate = dropoutRate
-      self.precision = precision
-      self.dense1 = Linear(weight: dense1Weight, bias: dense1Bias)
-      self.dense2 = Linear(weight: dense2Weight, bias: dense2Bias)
-      self.dense3 = Linear(weight: dense3Weight, bias: dense3Bias)
-      self.dropout1 = Dropout(p: dropoutRate)
-      self.dropout2 = Dropout(p: dropoutRate)
-      self.dropout3 = Dropout(p: dropoutRate)
-      self.policyHead = Linear(weight: policyHeadWeight, bias: policyHeadBias)
-      self.valueHidden = Linear(weight: valueHiddenWeight, bias: valueHiddenBias)
-      self.valueOutput = Linear(weight: valueOutputWeight, bias: valueOutputBias)
       super.init()
    }
 
@@ -151,42 +156,13 @@ public class PolicyValueNetwork: Module {
       self.init(seed: nil)
    }
 
-   /// Create a deep copy of this network
-   /// - Returns: A new PolicyValueNetwork with copied parameters
+   /// Create a deep copy of this network by applying this network's parameters
+   /// to a fresh instance. Generic over the parameter set — no hardcoded layer
+   /// names, so it survives future topology changes.
    public func clone () -> PolicyValueNetwork {
-      // Get all parameters from this network
-      let params = self.parameters()
-      let flattened = params.flattened()
-
-      // Build dictionary from flattened parameters
-      var paramDict: [String: MLXArray] = [:]
-      for (key, array) in flattened {
-         paramDict[key] = array
-      }
-
-      // Extract weights and biases for each layer
-      let dense1Weight = paramDict["dense1.weight"]!
-      let dense1Bias = paramDict["dense1.bias"]!
-      let dense2Weight = paramDict["dense2.weight"]!
-      let dense2Bias = paramDict["dense2.bias"]!
-      let dense3Weight = paramDict["dense3.weight"]!
-      let dense3Bias = paramDict["dense3.bias"]!
-      let policyHeadWeight = paramDict["policyHead.weight"]!
-      let policyHeadBias = paramDict["policyHead.bias"]!
-      let valueHiddenWeight = paramDict["valueHidden.weight"]!
-      let valueHiddenBias = paramDict["valueHidden.bias"]!
-      let valueOutputWeight = paramDict["valueOutput.weight"]!
-      let valueOutputBias = paramDict["valueOutput.bias"]!
-
-      // Create new network with copied weights
-      return PolicyValueNetwork(
-         dense1Weight: dense1Weight, dense1Bias: dense1Bias,
-         dense2Weight: dense2Weight, dense2Bias: dense2Bias,
-         dense3Weight: dense3Weight, dense3Bias: dense3Bias,
-         policyHeadWeight: policyHeadWeight, policyHeadBias: policyHeadBias,
-         valueHiddenWeight: valueHiddenWeight, valueHiddenBias: valueHiddenBias,
-         valueOutputWeight: valueOutputWeight, valueOutputBias: valueOutputBias,
-         dropoutRate: self.dropoutRate, precision: self.precision)
+      let copy = PolicyValueNetwork(seed: nil, dropoutRate: dropoutRate, precision: precision)
+      copy.update(parameters: ModuleParameters.unflattened(self.parameters().flattened()))
+      return copy
    }
 
    /// Initialize a linear layer with He initialization
@@ -202,25 +178,46 @@ public class PolicyValueNetwork: Module {
    }
 
    /// Forward pass through the network
-   /// - Parameter x: Input tensor of shape [batchSize, 357] in any float dtype; cast to `self.precision` on entry.
-   /// - Returns: Tuple of (policy_logits, value) where policy_logits is [batchSize, 48] and value is [batchSize, 1]. Both are in the network's precision; callers cast as needed.
+   /// - Parameter x: Input tensor of shape [batchSize, INPUT_DIMENSIONS] in any float dtype; cast to `self.precision` on entry.
+   /// - Returns: Tuple of (policyLogits [batchSize, 48], value [batchSize, 1] in [-1, 1]). Both are in the network's precision; callers cast as needed.
    public func execute (_ x: MLXArray) -> (policyLogits: MLXArray, value: MLXArray) {
-      precondition(x.shape.count == 2, "Input must have shape [batchSize, 361]")
+      precondition(x.shape.count == 2, "Input must have shape [batchSize, \(PolicyValueNetwork.INPUT_DIMENSIONS)]")
       precondition(x.shape[1] == PolicyValueNetwork.INPUT_DIMENSIONS, "Input must have \(PolicyValueNetwork.INPUT_DIMENSIONS) features")
 
+      let batch = x.shape[0]
       let xCast = x.dtype == self.precision ? x : x.asType(self.precision)
 
-      // Shared trunk with ReLU activations and dropout
-      var h = dropout1(relu(dense1(xCast)))
+      // Shared card encoder over the 12 visible-card blocks:
+      // [B, 144] → [B, 12, 12] → Linear ▶ ReLU ▶ Linear (over the last axis,
+      // weights shared across the card axis) → [B, 12, 32]
+      let cardBlock = xCast[0 ..< batch, PolicyValueNetwork.CARD_BLOCK_START ..< PolicyValueNetwork.CARD_BLOCK_END]
+         .reshaped([batch, PolicyValueNetwork.VISIBLE_CARD_COUNT, PolicyValueNetwork.CARD_FEATURES])
+      let cardEmbeddings = cardEncoder2(relu(cardEncoder1(cardBlock)))
+
+      // Order-invariant board summary — how card information reaches the trunk
+      // (and through it, the value head)
+      let boardSummary = mean(cardEmbeddings, axis: 1)  // [B, 32]
+
+      // Trunk input: every non-card float, plus the board summary
+      let preCard = xCast[0 ..< batch, 0 ..< PolicyValueNetwork.CARD_BLOCK_START]
+      let postCard = xCast[0 ..< batch, PolicyValueNetwork.CARD_BLOCK_END ..< PolicyValueNetwork.INPUT_DIMENSIONS]
+      var h = concatenated([preCard, postCard, boardSummary], axis: 1)  // [B, 388]
+
+      h = dropout1(relu(dense1(h)))
       h = dropout2(relu(dense2(h)))
       h = dropout3(relu(dense3(h)))
 
-      // Policy head (raw logits, no activation)
-      let policyLogits = policyHead(h)
+      // Policy: shared 32→1 readout over the card axis fills canonical moves
+      // 0..<12; the trunk head fills moves 12..<48. Card block k and purchase
+      // move k are both indexed 4*tier + position, so concatenation IS the
+      // correct scatter into canonical order.
+      let purchaseLogits = policyCardReadout(cardEmbeddings).reshaped([batch, PolicyValueNetwork.PURCHASE_MOVE_COUNT])
+      let trunkLogits = policyTrunkHead(h)  // [B, 36]
+      let policyLogits = concatenated([purchaseLogits, trunkLogits], axis: 1)  // [B, 48]
 
       // Value head (tanh activation for [-1, 1] range)
-      let valueHidden = relu(self.valueHidden(h))
-      let value = tanh(valueOutput(valueHidden))
+      let valueHiddenOut = relu(self.valueHidden(h))
+      let value = tanh(valueOutput(valueHiddenOut))
 
       return (policyLogits, value)
    }
@@ -279,6 +276,7 @@ public class PolicyValueNetwork: Module {
          "architectureVersion": PolicyValueNetwork.ARCHITECTURE_VERSION,
          "inputDimensions": PolicyValueNetwork.INPUT_DIMENSIONS,
          "policyDimensions": PolicyValueNetwork.POLICY_DIMENSIONS,
+         "cardEmbedDimensions": PolicyValueNetwork.CARD_EMBED_DIMENSIONS,
          "dropoutRate": dropoutRate
       ]
       let architectureURL = url.appendingPathComponent("architecture.json")
@@ -286,7 +284,12 @@ public class PolicyValueNetwork: Module {
       try architectureData.write(to: architectureURL)
    }
 
-   /// Factory method to create a network with weights loaded from disk
+   /// Factory method to create a network with weights loaded from disk.
+   ///
+   /// Generic over the parameter set: builds a fresh network, verifies the
+   /// saved keys and shapes match its parameters EXACTLY, then applies them.
+   /// A mismatch (missing, extra, or misshaped parameter) fails loudly rather
+   /// than silently producing a half-loaded network.
    /// - Parameters:
    ///   - url: Directory URL where the model is stored
    ///   - precision: dtype to materialize the loaded weights at
@@ -322,53 +325,44 @@ public class PolicyValueNetwork: Module {
                       userInfo: [NSLocalizedDescriptionKey: "Failed to deserialize weights"])
       }
 
-      // Helper to load an MLXArray from the weights dictionary
-      func loadArray (key: String) throws -> MLXArray {
-         guard let weightInfo = weightsDict[key],
-               let base64Data = weightInfo["data"] as? String,
-               let shape = weightInfo["shape"] as? [Int] else {
+      // Decode every saved parameter
+      var loaded: [(String, MLXArray)] = []
+      loaded.reserveCapacity(weightsDict.count)
+      for (key, info) in weightsDict {
+         guard let base64Data = info["data"] as? String,
+               let shape = info["shape"] as? [Int],
+               let data = Data(base64Encoded: base64Data) else {
             throw NSError(domain: "PolicyValueNetwork", code: 3,
-                         userInfo: [NSLocalizedDescriptionKey: "Missing weight data for parameter: \(key)"])
+                         userInfo: [NSLocalizedDescriptionKey: "Malformed weight entry for parameter: \(key)"])
          }
-
-         guard let data = Data(base64Encoded: base64Data) else {
-            throw NSError(domain: "PolicyValueNetwork", code: 4,
-                         userInfo: [NSLocalizedDescriptionKey: "Invalid base64 data for parameter: \(key)"])
-         }
-
          let count = shape.reduce(1, *)
          let floatArray = data.withUnsafeBytes { bytes in
             Array(UnsafeBufferPointer<Float>(start: bytes.baseAddress?.assumingMemoryBound(to: Float.self),
                                              count: count))
          }
-
-         return MLXArray(floatArray).reshaped(shape).asType(precision)
+         loaded.append((key, MLXArray(floatArray).reshaped(shape).asType(precision)))
       }
 
-      // Load all weights and biases from the dictionary
-      let dense1Weight = try loadArray(key: "dense1.weight")
-      let dense1Bias = try loadArray(key: "dense1.bias")
-      let dense2Weight = try loadArray(key: "dense2.weight")
-      let dense2Bias = try loadArray(key: "dense2.bias")
-      let dense3Weight = try loadArray(key: "dense3.weight")
-      let dense3Bias = try loadArray(key: "dense3.bias")
-      let policyHeadWeight = try loadArray(key: "policyHead.weight")
-      let policyHeadBias = try loadArray(key: "policyHead.bias")
-      let valueHiddenWeight = try loadArray(key: "valueHidden.weight")
-      let valueHiddenBias = try loadArray(key: "valueHidden.bias")
-      let valueOutputWeight = try loadArray(key: "valueOutput.weight")
-      let valueOutputBias = try loadArray(key: "valueOutput.bias")
+      let network = PolicyValueNetwork(seed: nil, dropoutRate: savedDropoutRate, precision: precision)
 
-      // Create network with loaded weights using the private initializer
-      let network = PolicyValueNetwork(
-         dense1Weight: dense1Weight, dense1Bias: dense1Bias,
-         dense2Weight: dense2Weight, dense2Bias: dense2Bias,
-         dense3Weight: dense3Weight, dense3Bias: dense3Bias,
-         policyHeadWeight: policyHeadWeight, policyHeadBias: policyHeadBias,
-         valueHiddenWeight: valueHiddenWeight, valueHiddenBias: valueHiddenBias,
-         valueOutputWeight: valueOutputWeight, valueOutputBias: valueOutputBias,
-         dropoutRate: savedDropoutRate, precision: precision)
+      // Strict key/shape verification against the fresh network's parameter set
+      let expected = Dictionary(uniqueKeysWithValues: network.parameters().flattened().map { ($0.0, $0.1.shape) })
+      let loadedKeys = Set(loaded.map { $0.0 })
+      let expectedKeys = Set(expected.keys)
+      guard loadedKeys == expectedKeys else {
+         let missing = expectedKeys.subtracting(loadedKeys).sorted()
+         let extra = loadedKeys.subtracting(expectedKeys).sorted()
+         throw NSError(domain: "PolicyValueNetwork", code: 5,
+                      userInfo: [NSLocalizedDescriptionKey: "Weight keys do not match architecture. Missing: \(missing). Unexpected: \(extra)."])
+      }
+      for (key, array) in loaded {
+         guard array.shape == expected[key] else {
+            throw NSError(domain: "PolicyValueNetwork", code: 5,
+                         userInfo: [NSLocalizedDescriptionKey: "Shape mismatch for \(key): saved \(array.shape), expected \(expected[key]!)"])
+         }
+      }
 
+      network.update(parameters: ModuleParameters.unflattened(loaded))
       return (network, metadata)
    }
 }
@@ -399,12 +393,6 @@ public class SplendorNeuralAgent: AgentProtocol {
       self.metadata = metadata
    }
 
-   /// Get both policy and value predictions (required by AgentProtocol)
-   /// - Parameters:
-   ///   - game: The current game state (must be Splendor.Game)
-   ///   - currentPlayerIndex: The index of the player whose turn it is
-   /// - Returns: Tuple of (policyLogits, valueEstimate) where policyLogits is an
-   ///   array of probabilities, one for each canonical move, and valueEstimate is a float between -1 and 1
    /// Create an MCTSSearch backed by this agent's network.
    public func makeMCTSSearch (monteCarloSamples: Int, cPuct: Float, debug: Bool = false) -> MCTSSearch {
       MCTSSearch(agent: self, monteCarloSamples: monteCarloSamples, cPuct: cPuct, debug: debug)
@@ -423,7 +411,7 @@ public class SplendorNeuralAgent: AgentProtocol {
       // Get the encoded game state, convert to Float array
       let encodedState = splendorGame.encoding().map { Float($0) }
 
-      // Create MLX array with shape [1, 361]
+      // Create MLX array with shape [1, INPUT_DIMENSIONS]
       let inputArray = MLXArray(encodedState).reshaped([1, PolicyValueNetwork.INPUT_DIMENSIONS])
 
       // Run inference

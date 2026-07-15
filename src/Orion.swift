@@ -47,6 +47,11 @@ struct Orion {
       else if CommandLine.arguments[1] == "generate" {
          try DataGenerator.main()
       }
+      else if CommandLine.arguments[1] == "nettest" {
+         // Hidden: structural verification of the network forward pass
+         // (slot→logit wiring, save/load/clone round trips)
+         try NetTest.main()
+      }
       else {
          print("Unknown command: \(CommandLine.arguments[1])")
       }
